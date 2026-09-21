@@ -19,6 +19,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Enemy|Attack")
 	bool CanAttack() const;
 
+	UFUNCTION(BlueprintPure, Category = "Enemy|Attack")
+	float GetAttackRange() const
+	{
+		return AttackRange;
+	}
+	
 protected:
 	void ResetAttackCooldown();
 
