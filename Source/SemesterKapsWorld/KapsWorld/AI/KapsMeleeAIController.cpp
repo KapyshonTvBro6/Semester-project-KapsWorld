@@ -70,7 +70,11 @@ void AKapsMeleeAIController::UpdateAI()
 		}
 		else if (!bIsChasing)
 		{
-			MoveToActor(PlayerPawn, Enemy->GetAttackRange() * 0.8f);
+			MoveToActor(
+	PlayerPawn,
+	Enemy->GetAttackRange() * 0.8f,
+	false
+);
 			bIsChasing = true;
 		}
 
