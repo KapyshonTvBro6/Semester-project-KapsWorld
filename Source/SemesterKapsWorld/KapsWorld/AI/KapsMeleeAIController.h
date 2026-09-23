@@ -29,7 +29,15 @@ protected:
 		meta = (ClampMin = "1.0", Units = "cm"))
 	float HomeAcceptanceRadius = 25.0f;
 
+	UPROPERTY(EditAnywhere, Category = "AI")
+	float LostTargetDelay = 3.0f;
+
+	FVector LastKnownPlayerLocation;
+	float LastSeenPlayerTime = 0.0f;
+	
 private:
+	bool bIsChasing = false;
+	
 	FVector HomeLocation;
 	FTimerHandle AIUpdateTimer;
 };

@@ -47,13 +47,20 @@ void AKapsMeleeAIController::UpdateAI()
 		return;
 	}
 
-	const float DistanceToPlayer = FVector::Dist(
-		Enemy->GetActorLocation(),
-		PlayerPawn->GetActorLocation()
-	);
+	const float DistanceToPlayer =
+		FVector::Dist(Enemy->GetActorLocation(), PlayerPawn->GetActorLocation());
 
-	if (DistanceToPlayer <= DetectionRange)
+	const bool bPlayerInDetectionRange = DistanceToPlayer <= DetectionRange;
+	const bool bCanSeePlayer =
+		bPlayerInDetectionRange && LineOfSightTo(PlayerPawn);
+
+	const float CurrentTime = GetWorld()->GetTimeSeconds();
+
+	if (bCanSeePlayer)
 	{
+		LastKnownPlayerLocation = PlayerPawn->GetActorLocation();
+		LastSeenPlayerTime = CurrentTime;
+
 		SetFocus(PlayerPawn);
 
 		if (DistanceToPlayer <= Enemy->GetAttackRange())
@@ -61,17 +68,26 @@ void AKapsMeleeAIController::UpdateAI()
 			StopMovement();
 			Enemy->TryAttack(PlayerPawn);
 		}
-		else
+		else if (!bIsChasing)
 		{
-			MoveToActor(
-				PlayerPawn,
-				Enemy->GetAttackRange() * 0.8f
-			);
+			MoveToActor(PlayerPawn, Enemy->GetAttackRange() * 0.8f);
+			bIsChasing = true;
 		}
 
 		return;
 	}
 
 	ClearFocus(EAIFocusPriority::Gameplay);
+	bIsChasing = false;
+
+	const bool bRecentlySawPlayer =
+		CurrentTime - LastSeenPlayerTime <= LostTargetDelay;
+
+	if (bRecentlySawPlayer)
+	{
+		MoveToLocation(LastKnownPlayerLocation, 80.0f);
+		return;
+	}
+
 	MoveToLocation(HomeLocation, HomeAcceptanceRadius);
 }
