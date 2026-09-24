@@ -3,6 +3,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Character.h"
+#include "KapsWorld/AI/KapsResourceTypes.h"
 #include "KapsEnemyBase.generated.h"
 
 class AController;
@@ -53,10 +54,18 @@ protected:
 	virtual void BeginPlay() override;
 
 	void Die();
+	void SpawnResourceDrops();
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Health",
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Enemy|Health",
 		meta = (ClampMin = "1.0"))
 	float MaxHealth = 50.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Enemy|Loot")
+	TArray<FKapsResourceDrop> ResourceDrops;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Enemy|Loot",
+		meta = (ClampMin = "0.0", Units = "cm"))
+	float LootScatterRadius = 80.0f;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Enemy|Health")
 	float CurrentHealth = 50.0f;

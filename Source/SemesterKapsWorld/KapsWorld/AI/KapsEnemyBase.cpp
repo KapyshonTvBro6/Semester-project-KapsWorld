@@ -4,6 +4,7 @@
 #include "AIController.h"
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "KapsWorld/AI/KapsResourcePickup.h"
 
 AKapsEnemyBase::AKapsEnemyBase()
 {
@@ -91,5 +92,44 @@ void AKapsEnemyBase::Die()
 	GetCharacterMovement()->DisableMovement();
 	GetCapsuleComponent()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 
+	SpawnResourceDrops();
+
 	OnEnemyDied.Broadcast(this);
+}
+
+void AKapsEnemyBase::SpawnResourceDrops()
+{
+	for (const FKapsResourceDrop& Drop : ResourceDrops)
+	{
+		if (Drop.ResourceId.IsNone() ||
+			FMath::FRandRange(0.0f, 100.0f) > Drop.DropChance)
+		{
+			continue;
+		}
+
+		const int32 MaxAmount = FMath::Max(Drop.MinAmount, Drop.MaxAmount);
+		const int32 Amount = FMath::RandRange(Drop.MinAmount, MaxAmount);
+
+		const FVector Offset = FMath::VRand() * LootScatterRadius;
+		const FVector SpawnLocation = GetActorLocation() +
+			FVector(Offset.X, Offset.Y, 20.0f);
+
+		TSubclassOf<AKapsResourcePickup> PickupClass = Drop.PickupClass;
+
+		if (!PickupClass)
+		{
+			PickupClass = AKapsResourcePickup::StaticClass();
+		}
+
+		AKapsResourcePickup* Pickup = GetWorld()->SpawnActor<AKapsResourcePickup>(
+			PickupClass,
+			SpawnLocation,
+			FRotator::ZeroRotator
+		);
+
+		if (IsValid(Pickup))
+		{
+			Pickup->InitializePickup(Drop.ResourceId, Amount);
+		}
+	}
 }
