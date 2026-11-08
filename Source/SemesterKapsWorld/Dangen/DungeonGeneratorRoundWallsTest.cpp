@@ -2,9 +2,11 @@
 //  Проверка скругления комнат формы «Круглая» (автотест).
 //
 //  Прогоняет генератор на нескольких ключах и по мешу стен проверяет:
-//   - есть вершины НЕ по границам клеток (значит дуга построена);
+//   - стены круглых комнат переставлены на эллипс (вершины НЕ по границам
+//     клеток) и переставленных граней больше, чем оставшихся лесенкой;
 //   - нет вырожденных треугольников;
-//   - крышка уголков добавляет плиты крыши.
+//   - ни одна переставленная грань не стоит в клетке коридора (проходы целы);
+//   - крыша не получает новых плит: скругление делает только полукруглую стену.
 //
 //  Выгрузка вершин мешей (нужна, чтобы посмотреть контур сверху скриптом
 //  Saved/AgentScratch/render_compare.py) включается только ключом -dangenrounddump:
@@ -82,13 +84,49 @@ namespace DangenRoundTest
 		Gen->bSpawnMarkers = false;
 		Gen->bBuildGeometry = true;
 		Gen->bRoundCircleWalls = bRound;
-		Gen->WallArcSegments = 16;
-		Gen->bCapRoundCorners = true;
 		return Gen;
 	}
 
+	static bool InGrid(FIntPoint C, const ADungeonGenerator* Gen)
+	{
+		return C.X >= 0 && C.Y >= 0 && C.X < Gen->GridW && C.Y < Gen->GridH;
+	}
+
+	static FIntPoint CellOf(const FVector& P, const ADungeonGenerator* Gen, float Cell)
+	{
+		// bCenterOnActor -> сетка центрирована на акторе
+		const float OX = Gen->GridW * Cell * 0.5f;
+		const float OY = Gen->GridH * Cell * 0.5f;
+		return FIntPoint(FMath::FloorToInt((P.X + OX) / Cell), FMath::FloorToInt((P.Y + OY) / Cell));
+	}
+
+	// Грань стоит на прежнем месте внутри прямоугольника круглой комнаты? Берём
+	// середину нижнего ребра, по нормали грани находим клетку камня и клетку
+	// открытую, и смотрим, принадлежат ли они этой круглой комнате.
+	static bool IsFaceOfCircleRoom(const TArray<FProcMeshVertex>& Verts, int32 QuadBase, const ADungeonGenerator* Gen, float Cell)
+	{
+		const FVector& A = Verts[QuadBase].Position;
+		const FVector& B = Verts[QuadBase + 1].Position;
+		const FVector N  = Verts[QuadBase].Normal.GetSafeNormal();
+		if (N.SizeSquared() < KINDA_SMALL_NUMBER) return false;
+
+		const FVector M = (A + B) * 0.5f;
+		const FIntPoint Rock = CellOf(M - N * (Cell * 0.5f), Gen, Cell);
+		const FIntPoint Open = CellOf(M + N * (Cell * 0.5f), Gen, Cell);
+		if (!InGrid(Rock, Gen) || !InGrid(Open, Gen)) return false;
+
+		const int32 RI = Rock.Y * Gen->GridW + Rock.X;
+		const int32 OI = Open.Y * Gen->GridW + Open.X;
+		if (Gen->Grid[RI] != 0 || Gen->Grid[OI] == 0) return false;   // камень | открытая
+
+		const int32 Room = Gen->RoomMap[OI];
+		if (Room < 0 || !Gen->Rooms.IsValidIndex(Room)) return false;
+		if (Gen->Rooms[Room].Shape != ERoomShape::Circle) return false;
+		return Gen->RoomMap[RI] != Room;   // клетка камня внутри прямоугольника, но не комната
+	}
+
 	// Вершина «не по сетке» = стоит внутри клетки, а не на её границе: таким
-	// образом отличаем грани дуги и крышки уголков от обычных граней-лесенок.
+	// образом отличаем переставленные грани от обычных граней-лесенок.
 	static bool OffGrid(const FVector& P, float Cell)
 	{
 		const float FX = FMath::Abs(P.X / Cell - FMath::RoundToFloat(P.X / Cell));
@@ -107,7 +145,7 @@ bool FDangenRoundWallsTest::RunTest(const FString& Parameters)
 	const float Cell = 100.f;
 	const int32 Seeds[] = { 197, 42, 1234, 7, 20260108 };
 
-	int32 Runs = 0, RunsWithCircles = 0, RunsWithArc = 0, TotalCapVerts = 0;
+	int32 Runs = 0, RunsWithCircles = 0, RunsWithArc = 0, TotalRoofOffGrid = 0;
 	FString Dump;
 
 	for (int32 Seed : Seeds)
@@ -124,8 +162,6 @@ bool FDangenRoundWallsTest::RunTest(const FString& Parameters)
 		Gen->bSpawnMarkers = false;
 		Gen->bBuildGeometry = true;
 		Gen->bRoundCircleWalls = true;
-		Gen->WallArcSegments = 16;
-		Gen->bCapRoundCorners = true;
 
 		Gen->Generate();
 		++Runs;
@@ -164,8 +200,8 @@ bool FDangenRoundWallsTest::RunTest(const FString& Parameters)
 		}
 		TestEqual(TEXT("нет вырожденных треугольников в стенах"), Degenerate, 0);
 
-		// Дуга не имеет права стоять в клетке коридора или чужой комнаты: иначе
-		// гладкая стена перерезала бы проход и подземелье стало бы непроходимым.
+		// Переставленная грань не имеет права стоять в клетке коридора или чужой
+		// комнаты: иначе стена перерезала бы проход и подземелье стало бы непроходимым.
 		const float OX = Gen->GridW * Cell * 0.5f;   // bCenterOnActor -> сетка центрирована на акторе
 		const float OY = Gen->GridH * Cell * 0.5f;
 		int32 ArcInCorridorCell = 0;
@@ -192,7 +228,7 @@ bool FDangenRoundWallsTest::RunTest(const FString& Parameters)
 		}
 		TestEqual(TEXT("граней дуги в клетке коридора или чужой клетке"), ArcInCorridorCell, 0);
 
-		int32 CapVerts = 0;
+		int32 RoofOffGrid = 0;   // новых плит крышки у круглых комнат быть не должно
 		if (UProceduralMeshComponent* Roof = MeshByName(Gen, TEXT("RoofMesh")))
 		{
 			if (FProcMeshSection* RoofSec = Roof->GetProcMeshSection(0))
@@ -201,23 +237,37 @@ bool FDangenRoundWallsTest::RunTest(const FString& Parameters)
 				{
 					const float FX = FMath::Abs(V.Position.X / Cell - FMath::RoundToFloat(V.Position.X / Cell));
 					const float FY = FMath::Abs(V.Position.Y / Cell - FMath::RoundToFloat(V.Position.Y / Cell));
-					if (FX > 1e-3f || FY > 1e-3f) ++CapVerts;
+					if (FX > 1e-3f || FY > 1e-3f) ++RoofOffGrid;
 				}
 			}
 		}
 
-		UE_LOG(LogTemp, Display, TEXT("DangenTest: ключ [%s]: вершин стен [%s], граней дуги [%s], вершин крышки [%s]"),
+		// Сколько прежних граней круглой комнаты ОСТАЛОСЬ на своём месте (у входов
+		// и там, где через комнату идёт коридор). Их должно быть заметно меньше,
+		// чем переставленных, иначе скругления фактически нет.
+		int32 ArcQuads = 0, KeptQuads = 0;
+		for (int32 i = 0; i + 3 < WallsSec->ProcVertexBuffer.Num(); i += 4)
+		{
+			const FProcMeshVertex& V0 = WallsSec->ProcVertexBuffer[i];
+			const FProcMeshVertex& V1 = WallsSec->ProcVertexBuffer[i + 1];
+			if (OffGrid(V0.Position, Cell) || OffGrid(V1.Position, Cell)) { ++ArcQuads; continue; }
+			if (!IsFaceOfCircleRoom(WallsSec->ProcVertexBuffer, i, Gen, Cell)) continue;
+			++KeptQuads;
+		}
+
+		UE_LOG(LogTemp, Display, TEXT("DangenTest: ключ [%s]: вершин стен [%s], переставлено на эллипс [%s], прежних граней у круглых комнат [%s], вне сетки на крыше [%s]"),
 		       *FString::FromInt(Seed), *FString::FromInt(static_cast<int32>(WallsSec->ProcVertexBuffer.Num())),
-		       *FString::FromInt(ArcVerts), *FString::FromInt(CapVerts));
+		       *FString::FromInt(ArcQuads), *FString::FromInt(KeptQuads), *FString::FromInt(RoofOffGrid));
 
 		if (ArcVerts > 0) ++RunsWithArc;
-		TotalCapVerts += CapVerts;
+		TotalRoofOffGrid += RoofOffGrid;
 
-		// Если в круглых комнатах дуга не построилась хотя бы в одном прогоне — это провал.
+		// Если в круглых комнатах грани не переставлены хотя бы в одном прогоне — это провал.
 		if (CircleRooms > 0)
 		{
-			TestTrue(TEXT("круглые комнаты дают грани дуги"), ArcVerts > 0);
-			TestTrue(TEXT("крышка уголков добавляет плиты крыши"), CapVerts > 0);
+			TestTrue(TEXT("круглые комнаты переставляют грани на эллипс"), ArcQuads > 0);
+			TestTrue(TEXT("переставленных граней больше, чем оставшихся лесенкой"), ArcQuads > KeptQuads);
+			TestEqual(TEXT("крыша не получает новых плит из-за скругления"), RoofOffGrid, 0);
 		}
 
 		// Выгружаем прогон с круглыми комнатами (последний подходящий), чтобы
@@ -230,12 +280,12 @@ bool FDangenRoundWallsTest::RunTest(const FString& Parameters)
 		Gen->Destroy();   // мир тесту не нужен, но удаление безопасно в любом случае
 	}
 
-	UE_LOG(LogTemp, Display, TEXT("DangenTest ИТОГ: прогонов [%s], с круглыми комнатами [%s], с дугой [%s], вершин крышки [%s]"),
+	UE_LOG(LogTemp, Display, TEXT("DangenTest ИТОГ: прогонов [%s], с круглыми комнатами [%s], со скруглением [%s], вне сетки на крыше [%s]"),
 	       *FString::FromInt(Runs), *FString::FromInt(RunsWithCircles),
-	       *FString::FromInt(RunsWithArc), *FString::FromInt(TotalCapVerts));
+	       *FString::FromInt(RunsWithArc), *FString::FromInt(TotalRoofOffGrid));
 
 	TestTrue(TEXT("хотя бы в одном прогоне есть круглая комната"), RunsWithCircles > 0);
-	TestTrue(TEXT("хотя бы в одном прогоне дуга построена"), RunsWithArc > 0);
+	TestTrue(TEXT("хотя бы в одном прогоне стены скруглены"), RunsWithArc > 0);
 
 	const FString Dir = FPaths::ProjectSavedDir() / TEXT("AgentScratch");
 	const bool bDumpRequested = FParse::Param(FCommandLine::Get(), TEXT("dangenrounddump"));
