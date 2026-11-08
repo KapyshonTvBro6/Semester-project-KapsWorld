@@ -406,6 +406,10 @@ private:
 		FVector2D A, B;        // куда эти концы переставлены (на эллипсе)
 		FIntPoint RockCell;    // клетка камня, чью грань переставляем
 		int32     DirIndex = 0;// направление грани камня (индекс в WallDirs)
+		int32     BandSides = 0;// чем закрывать полосу между прежним ребром и новой
+		                       // гранью: бит 1 - кусок в открытой клетке комнаты
+		                       // (крышка), бит 2 - кусок в клетке камня (пол).
+		                       // Полоса может быть с обеих сторон границы сразу.
 		bool      bArc = true; // false = грань осталась на прежнем месте (у входа/коридора)
 		float     MidAngle = 0.f; // угол середины грани: по нему идёт обход по кругу
 	};
@@ -420,6 +424,9 @@ private:
 
 	bool RoomCellOwned(int32 X, int32 Y, int32 RoomIndex) const;
 	bool RoundChordCrossesPassage(float AX, float AY, float BX, float BY, int32 RoomIndex) const;
+	// С какой стороны границы легла полоса между прежним ребром клетки и новой
+	// гранью: из этого выбирается, чем её закрывать — крышкой или полом.
+	int32 RoundBandSides(const FRoundFace& Face, int32 RoomIndex) const;
 	// Грани круглых комнат + маска GridW*GridH*4: 1 = прежнюю грань этой клетки
 	// камня на этом направлении ставить уже не нужно, её заменила переставленная.
 	void BuildRoundRooms(TArray<FRoundRoom>& OutRooms, TArray<uint8>& OutSkip) const;

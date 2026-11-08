@@ -64,9 +64,19 @@ namespace DangenRoundTest
 			if (!S) continue;
 			for (const FProcMeshVertex& V : S->ProcVertexBuffer)
 			{
-				Dump += FString::Printf(TEXT("%s %.2f %.2f %.2f %.2f %.2f %.2f\n"), Tag,
+				Dump += FString::Printf(TEXT("v %s %.2f %.2f %.2f %.2f %.2f %.2f\n"), Tag,
 				                        V.Position.X, V.Position.Y, V.Position.Z,
 				                        V.Normal.X, V.Normal.Y, V.Normal.Z);
+			}
+
+			// Индексы тоже: без них не разобрать, какие треугольники к каким вершинам
+			// относятся, а проверка оболочки (стена <=> пол и крыша) их требует.
+			for (int32 i = 0; i + 2 < S->ProcIndexBuffer.Num(); i += 3)
+			{
+				Dump += FString::Printf(TEXT("t %s %d %d %d\n"), Tag,
+				                        static_cast<int32>(S->ProcIndexBuffer[i]),
+				                        static_cast<int32>(S->ProcIndexBuffer[i + 1]),
+				                        static_cast<int32>(S->ProcIndexBuffer[i + 2]));
 			}
 		}
 		return Dump;
@@ -145,7 +155,8 @@ bool FDangenRoundWallsTest::RunTest(const FString& Parameters)
 	const float Cell = 100.f;
 	const int32 Seeds[] = { 197, 42, 1234, 7, 20260108 };
 
-	int32 Runs = 0, RunsWithCircles = 0, RunsWithArc = 0, TotalRoofOffGrid = 0;
+	int32 Runs = 0, RunsWithCircles = 0, RunsWithArc = 0;
+	int32 TotalRoofPlates = 0, TotalFloorPlates = 0;
 	FString Dump;
 
 	for (int32 Seed : Seeds)
@@ -228,16 +239,44 @@ bool FDangenRoundWallsTest::RunTest(const FString& Parameters)
 		}
 		TestEqual(TEXT("граней дуги в клетке коридора или чужой клетке"), ArcInCorridorCell, 0);
 
-		int32 RoofOffGrid = 0;   // новых плит крышки у круглых комнат быть не должно
+		// Примыкания стен к крыше и полу. Плита примыкания единственная деталь,
+		// которая выходит за клетки сетки: её внутренние углы стоят на самой стене.
+		// Поэтому вне сетки должны быть ровно 4 вершины на каждую такую плиту, а
+		// вырожденных треугольников ни на крыше, ни на полу — ни одной.
+		int32 RoofOffGrid = 0, RoofDegenerate = 0;
 		if (UProceduralMeshComponent* Roof = MeshByName(Gen, TEXT("RoofMesh")))
 		{
 			if (FProcMeshSection* RoofSec = Roof->GetProcMeshSection(0))
 			{
 				for (const FProcMeshVertex& V : RoofSec->ProcVertexBuffer)
 				{
-					const float FX = FMath::Abs(V.Position.X / Cell - FMath::RoundToFloat(V.Position.X / Cell));
-					const float FY = FMath::Abs(V.Position.Y / Cell - FMath::RoundToFloat(V.Position.Y / Cell));
-					if (FX > 1e-3f || FY > 1e-3f) ++RoofOffGrid;
+					if (OffGrid(V.Position, Cell)) ++RoofOffGrid;
+				}
+				for (int32 i = 0; i + 2 < RoofSec->ProcIndexBuffer.Num(); i += 3)
+				{
+					const FVector& A = RoofSec->ProcVertexBuffer[static_cast<int32>(RoofSec->ProcIndexBuffer[i])].Position;
+					const FVector& B = RoofSec->ProcVertexBuffer[static_cast<int32>(RoofSec->ProcIndexBuffer[i + 1])].Position;
+					const FVector& C = RoofSec->ProcVertexBuffer[static_cast<int32>(RoofSec->ProcIndexBuffer[i + 2])].Position;
+					if (FVector::CrossProduct(B - A, C - A).Size() < 1e-3f) ++RoofDegenerate;
+				}
+			}
+		}
+
+		int32 FloorOffGrid = 0, FloorDegenerate = 0;
+		if (UProceduralMeshComponent* Floor = MeshByName(Gen, TEXT("FloorMesh")))
+		{
+			if (FProcMeshSection* FloorSec = Floor->GetProcMeshSection(0))
+			{
+				for (const FProcMeshVertex& V : FloorSec->ProcVertexBuffer)
+				{
+					if (OffGrid(V.Position, Cell)) ++FloorOffGrid;
+				}
+				for (int32 i = 0; i + 2 < FloorSec->ProcIndexBuffer.Num(); i += 3)
+				{
+					const FVector& A = FloorSec->ProcVertexBuffer[static_cast<int32>(FloorSec->ProcIndexBuffer[i])].Position;
+					const FVector& B = FloorSec->ProcVertexBuffer[static_cast<int32>(FloorSec->ProcIndexBuffer[i + 1])].Position;
+					const FVector& C = FloorSec->ProcVertexBuffer[static_cast<int32>(FloorSec->ProcIndexBuffer[i + 2])].Position;
+					if (FVector::CrossProduct(B - A, C - A).Size() < 1e-3f) ++FloorDegenerate;
 				}
 			}
 		}
@@ -255,19 +294,28 @@ bool FDangenRoundWallsTest::RunTest(const FString& Parameters)
 			++KeptQuads;
 		}
 
-		UE_LOG(LogTemp, Display, TEXT("DangenTest: ключ [%s]: вершин стен [%s], переставлено на эллипс [%s], прежних граней у круглых комнат [%s], вне сетки на крыше [%s]"),
+		UE_LOG(LogTemp, Display, TEXT("DangenTest: ключ [%s]: вершин стен [%s], переставлено на эллипс [%s], прежних граней у круглых комнат [%s], плит примыкания: крыша [%s], пол [%s]"),
 		       *FString::FromInt(Seed), *FString::FromInt(static_cast<int32>(WallsSec->ProcVertexBuffer.Num())),
-		       *FString::FromInt(ArcQuads), *FString::FromInt(KeptQuads), *FString::FromInt(RoofOffGrid));
+		       *FString::FromInt(ArcQuads), *FString::FromInt(KeptQuads),
+		       *FString::FromInt(RoofOffGrid / 4), *FString::FromInt(FloorOffGrid / 4));
 
 		if (ArcVerts > 0) ++RunsWithArc;
-		TotalRoofOffGrid += RoofOffGrid;
+		TotalRoofPlates += RoofOffGrid / 4;
+		TotalFloorPlates += FloorOffGrid / 4;
 
 		// Если в круглых комнатах грани не переставлены хотя бы в одном прогоне — это провал.
 		if (CircleRooms > 0)
 		{
 			TestTrue(TEXT("круглые комнаты переставляют грани на эллипс"), ArcQuads > 0);
 			TestTrue(TEXT("переставленных граней больше, чем оставшихся лесенкой"), ArcQuads > KeptQuads);
-			TestEqual(TEXT("крыша не получает новых плит из-за скругления"), RoofOffGrid, 0);
+		TestTrue(TEXT("переставленные грани примкнуты плитой к крыше или полу"),
+		         RoofOffGrid + FloorOffGrid > 0);
+			TestEqual(TEXT("нет вырожденных треугольников на крыше"), RoofDegenerate, 0);
+		TestEqual(TEXT("нет вырожденных треугольников на полу"), FloorDegenerate, 0);
+		// На каждую переставленную грань приходится плита примыкания, и у каждой
+		// плиты есть хотя бы один угол на самой стене, то есть вне клеток сетки.
+		TestTrue(TEXT("каждая переставленная грань получила плиту примыкания"),
+		         RoofOffGrid + FloorOffGrid >= ArcQuads);
 		}
 
 		// Выгружаем прогон с круглыми комнатами (последний подходящий), чтобы
@@ -280,12 +328,14 @@ bool FDangenRoundWallsTest::RunTest(const FString& Parameters)
 		Gen->Destroy();   // мир тесту не нужен, но удаление безопасно в любом случае
 	}
 
-	UE_LOG(LogTemp, Display, TEXT("DangenTest ИТОГ: прогонов [%s], с круглыми комнатами [%s], со скруглением [%s], вне сетки на крыше [%s]"),
+	UE_LOG(LogTemp, Display, TEXT("DangenTest ИТОГ: прогонов [%s], с круглыми комнатами [%s], со скруглением [%s], плит примыкания: крыша [%s], пол [%s]"),
 	       *FString::FromInt(Runs), *FString::FromInt(RunsWithCircles),
-	       *FString::FromInt(RunsWithArc), *FString::FromInt(TotalRoofOffGrid));
+	       *FString::FromInt(RunsWithArc),
+	       *FString::FromInt(TotalRoofPlates), *FString::FromInt(TotalFloorPlates));
 
 	TestTrue(TEXT("хотя бы в одном прогоне есть круглая комната"), RunsWithCircles > 0);
 	TestTrue(TEXT("хотя бы в одном прогоне стены скруглены"), RunsWithArc > 0);
+	TestTrue(TEXT("за все прогоны есть плиты примыкания"), TotalRoofPlates + TotalFloorPlates > 0);
 
 	const FString Dir = FPaths::ProjectSavedDir() / TEXT("AgentScratch");
 	const bool bDumpRequested = FParse::Param(FCommandLine::Get(), TEXT("dangenrounddump"));
