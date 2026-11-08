@@ -6,7 +6,8 @@
 //     клеток) и переставленных граней больше, чем оставшихся лесенкой;
 //   - нет вырожденных треугольников;
 //   - ни одна переставленная грань не стоит в клетке коридора (проходы целы);
-//   - крыша не получает новых плит: скругление делает только полукруглую стену.
+//   - крыша и пол не получают новых полигонов: крышка и плита клетки просто
+//     дотягивают свою сторону до края стены.
 //
 //  Выгрузка вершин мешей (нужна, чтобы посмотреть контур сверху скриптом
 //  Saved/AgentScratch/render_compare.py) включается только ключом -dangenrounddump:
@@ -156,7 +157,7 @@ bool FDangenRoundWallsTest::RunTest(const FString& Parameters)
 	const int32 Seeds[] = { 197, 42, 1234, 7, 20260108 };
 
 	int32 Runs = 0, RunsWithCircles = 0, RunsWithArc = 0;
-	int32 TotalRoofPlates = 0, TotalFloorPlates = 0;
+	int32 TotalRoofOffGrid = 0, TotalFloorOffGrid = 0;
 	FString Dump;
 
 	for (int32 Seed : Seeds)
@@ -239,10 +240,14 @@ bool FDangenRoundWallsTest::RunTest(const FString& Parameters)
 		}
 		TestEqual(TEXT("граней дуги в клетке коридора или чужой клетке"), ArcInCorridorCell, 0);
 
-		// Примыкания стен к крыше и полу. Плита примыкания единственная деталь,
-		// которая выходит за клетки сетки: её внутренние углы стоят на самой стене.
-		// Поэтому вне сетки должны быть ровно 4 вершины на каждую такую плиту, а
-		// вырожденных треугольников ни на крыше, ни на полу — ни одной.
+		// Соединение стены с крышей и полом. Крышка клетки (или плита пола), у
+		// которой на ребре стоит переставленная граня, — единственный полигон,
+		// выходящий за клетки сетки: его крыло дотянуто до самой стены, и его
+		// углы стоят на краю грани. Полигонов при этом не добавилось: крышка
+		// клетки осталась одной крышкой, только с ломаной стороной. Поэтому
+		// считаем вершины вне сетки и следим, чтобы вырожденных треугольников
+		// ни на крыше, ни на полу не было ни одного: веерная триангуляция
+		// невыпуклого крыла как раз их и даёт.
 		int32 RoofOffGrid = 0, RoofDegenerate = 0;
 		if (UProceduralMeshComponent* Roof = MeshByName(Gen, TEXT("RoofMesh")))
 		{
@@ -281,6 +286,102 @@ bool FDangenRoundWallsTest::RunTest(const FString& Parameters)
 			}
 		}
 
+		// Оболочка проверяется как в редакторе: берём нижний край каждой грани дуги
+		// и смотрим, дотягивается ли до него пол (или крышка, если снаружи камень),
+		// и крышка ли доходит до верхнего края с наружной стороны. Иначе в потолке
+		// чёрная дыра, а под стеной яма — ровно то, что было видно на снимках.
+		auto PointInMesh = [](UProceduralMeshComponent* Mesh, double X, double Y) -> bool
+		{
+			if (!Mesh) return false;
+			FProcMeshSection* Sec = Mesh->GetProcMeshSection(0);
+			if (!Sec) return false;
+
+			for (int32 i = 0; i + 2 < Sec->ProcIndexBuffer.Num(); i += 3)
+			{
+				const FVector& A = Sec->ProcVertexBuffer[static_cast<int32>(Sec->ProcIndexBuffer[i])].Position;
+				const FVector& B = Sec->ProcVertexBuffer[static_cast<int32>(Sec->ProcIndexBuffer[i + 1])].Position;
+				const FVector& C = Sec->ProcVertexBuffer[static_cast<int32>(Sec->ProcIndexBuffer[i + 2])].Position;
+
+				const double D1 = (B.X - A.X) * (Y - A.Y) - (B.Y - A.Y) * (X - A.X);
+				const double D2 = (C.X - B.X) * (Y - B.Y) - (C.Y - B.Y) * (X - B.X);
+				const double D3 = (A.X - C.X) * (Y - C.Y) - (A.Y - C.Y) * (X - C.X);
+
+				if ((D1 >= 0.0 && D2 >= 0.0 && D3 >= 0.0) || (D1 <= 0.0 && D2 <= 0.0 && D3 <= 0.0)) return true;
+			}
+
+			return false;
+		};
+
+		UProceduralMeshComponent* RoofLook = MeshByName(Gen, TEXT("RoofMesh"));
+		UProceduralMeshComponent* FloorLook = MeshByName(Gen, TEXT("FloorMesh"));
+
+		int32 RoofGaps = 0, FloorGaps = 0;
+		const float SliceT[3] = { 0.25f, 0.5f, 0.75f };
+		for (int32 i = 0; i + 3 < WallsSec->ProcVertexBuffer.Num(); i += 4)
+		{
+			const FProcMeshVertex& V0 = WallsSec->ProcVertexBuffer[i];
+			const FProcMeshVertex& V1 = WallsSec->ProcVertexBuffer[i + 1];
+			if (!OffGrid(V0.Position, Cell) && !OffGrid(V1.Position, Cell)) continue;   // обычная грань-лесенка
+
+			double NX = (V0.Normal.X + V1.Normal.X) * 0.5;
+			double NY = (V0.Normal.Y + V1.Normal.Y) * 0.5;
+			const double Len = FMath::Sqrt(NX * NX + NY * NY);
+			if (Len < 1e-6) continue;
+			const double OutX = -NX / Len, OutY = -NY / Len;   // наружу от центра комнаты
+
+			for (const float T : SliceT)
+			{
+				const double PX = V0.Position.X + (V1.Position.X - V0.Position.X) * static_cast<double>(T);
+				const double PY = V0.Position.Y + (V1.Position.Y - V0.Position.Y) * static_cast<double>(T);
+
+				const double SideSign[2] = { 1.0, -1.0 };
+				const double SideDist[2] = { 2.0, 10.0 };
+				for (const double S : SideSign)
+				{
+					for (const double D : SideDist)
+					{
+						const double SX = PX + D * S * OutX;
+						const double SY = PY + D * S * OutY;
+						if (!PointInMesh(FloorLook, SX, SY) && !PointInMesh(RoofLook, SX, SY)) ++FloorGaps;
+					}
+				}
+
+				const double OutDist[3] = { 2.0, 10.0, 30.0 };
+				for (const double D : OutDist)
+				{
+					const double SX = PX + D * OutX;
+					const double SY = PY + D * OutY;
+					if (PointInMesh(FloorLook, SX, SY)) continue;   // снаружи проходимая клетка: крыши там нет по замыслу
+					if (!PointInMesh(RoofLook, SX, SY)) ++RoofGaps;
+				}
+			}
+		}
+
+		// Сколько клеток сетки накрыто крышкой и полом. Крышка обязана быть на
+		// каждой клетке камня, пол — на каждой проходимой клетке, и лишнего ни там,
+		// ни там быть не должно: скругление не добавляет ни клеток, ни отдельных
+		// плит — оно лишь меняет форму уже существующих крышек и полов.
+		int32 RockCells = 0, CarvedCells = 0;
+		for (const uint8 G : Gen->Grid)
+		{
+			if (G == 0) ++RockCells;
+			else if (G == 1) ++CarvedCells;
+		}
+
+		int32 RoofCovered = 0, FloorCovered = 0;
+		const double OffX = Gen->bCenterOnActor ? -Gen->GridW * Cell * 0.5 : 0.0;
+		const double OffY = Gen->bCenterOnActor ? -Gen->GridH * Cell * 0.5 : 0.0;
+		for (int32 Y = 0; Y < Gen->GridH; ++Y)
+		{
+			for (int32 X = 0; X < Gen->GridW; ++X)
+			{
+				const double CX = (X + 0.5) * Cell + OffX;
+				const double CY = (Y + 0.5) * Cell + OffY;
+				if (PointInMesh(RoofLook, CX, CY)) ++RoofCovered;
+				if (PointInMesh(FloorLook, CX, CY)) ++FloorCovered;
+			}
+		}
+
 		// Сколько прежних граней круглой комнаты ОСТАЛОСЬ на своём месте (у входов
 		// и там, где через комнату идёт коридор). Их должно быть заметно меньше,
 		// чем переставленных, иначе скругления фактически нет.
@@ -294,28 +395,40 @@ bool FDangenRoundWallsTest::RunTest(const FString& Parameters)
 			++KeptQuads;
 		}
 
-		UE_LOG(LogTemp, Display, TEXT("DangenTest: ключ [%s]: вершин стен [%s], переставлено на эллипс [%s], прежних граней у круглых комнат [%s], плит примыкания: крыша [%s], пол [%s]"),
+		UE_LOG(LogTemp, Display, TEXT("DangenTest: ключ [%s]: вершин стен [%s], переставлено на эллипс [%s], прежних граней у круглых комнат [%s], крыльев (вершин вне сетки): крыша [%s], пол [%s], дыр: потолок [%s] пол [%s], накрыто клеток: крыша [%s] из [%s], пол [%s] из [%s]"),
 		       *FString::FromInt(Seed), *FString::FromInt(static_cast<int32>(WallsSec->ProcVertexBuffer.Num())),
 		       *FString::FromInt(ArcQuads), *FString::FromInt(KeptQuads),
-		       *FString::FromInt(RoofOffGrid / 4), *FString::FromInt(FloorOffGrid / 4));
+		       *FString::FromInt(RoofOffGrid), *FString::FromInt(FloorOffGrid),
+		       *FString::FromInt(RoofGaps), *FString::FromInt(FloorGaps),
+		       *FString::FromInt(RoofCovered), *FString::FromInt(RockCells),
+		       *FString::FromInt(FloorCovered), *FString::FromInt(CarvedCells));
 
 		if (ArcVerts > 0) ++RunsWithArc;
-		TotalRoofPlates += RoofOffGrid / 4;
-		TotalFloorPlates += FloorOffGrid / 4;
+		TotalRoofOffGrid += RoofOffGrid;
+		TotalFloorOffGrid += FloorOffGrid;
 
 		// Если в круглых комнатах грани не переставлены хотя бы в одном прогоне — это провал.
 		if (CircleRooms > 0)
 		{
 			TestTrue(TEXT("круглые комнаты переставляют грани на эллипс"), ArcQuads > 0);
 			TestTrue(TEXT("переставленных граней больше, чем оставшихся лесенкой"), ArcQuads > KeptQuads);
-		TestTrue(TEXT("переставленные грани примкнуты плитой к крыше или полу"),
-		         RoofOffGrid + FloorOffGrid > 0);
+
+			// И крышка, и пол дотянуты до стены теми же своими полигонами:
+			// у обеих поверхностей есть вершины там, где клеток сетки нет.
+			TestTrue(TEXT("крышка дотянута до стены (её углы вне клеток сетки)"), RoofOffGrid > 0);
+			TestTrue(TEXT("пол дотянут до стены (его углы вне клеток сетки)"), FloorOffGrid > 0);
+
 			TestEqual(TEXT("нет вырожденных треугольников на крыше"), RoofDegenerate, 0);
-		TestEqual(TEXT("нет вырожденных треугольников на полу"), FloorDegenerate, 0);
-		// На каждую переставленную грань приходится плита примыкания, и у каждой
-		// плиты есть хотя бы один угол на самой стене, то есть вне клеток сетки.
-		TestTrue(TEXT("каждая переставленная грань получила плиту примыкания"),
-		         RoofOffGrid + FloorOffGrid >= ArcQuads);
+			TestEqual(TEXT("нет вырожденных треугольников на полу"), FloorDegenerate, 0);
+
+			TestEqual(TEXT("над верхним краем граней дуги крышка доходит до стены (дыр в потолке нет)"), RoofGaps, 0);
+			TestEqual(TEXT("под нижним краем граней дуги есть пол или крышка (ям под стеной нет)"), FloorGaps, 0);
+			// Крышка обязана накрывать каждую клетку камня, а пол — каждую
+			// проходимую клетку. Крышка может накрыть и часть проходимой клетки:
+			// если граня ушла вглубь клетки, пространство за ней из проходимого
+			// становится камнем, и дыры там быть не должно.
+			TestTrue(TEXT("крышка накрывает все клетки камня (дыр в крышке нет)"), RoofCovered >= RockCells);
+			TestTrue(TEXT("пол лежит на всех проходимых клетках (ям под полом нет)"), FloorCovered >= CarvedCells);
 		}
 
 		// Выгружаем прогон с круглыми комнатами (последний подходящий), чтобы
@@ -328,14 +441,14 @@ bool FDangenRoundWallsTest::RunTest(const FString& Parameters)
 		Gen->Destroy();   // мир тесту не нужен, но удаление безопасно в любом случае
 	}
 
-	UE_LOG(LogTemp, Display, TEXT("DangenTest ИТОГ: прогонов [%s], с круглыми комнатами [%s], со скруглением [%s], плит примыкания: крыша [%s], пол [%s]"),
+	UE_LOG(LogTemp, Display, TEXT("DangenTest ИТОГ: прогонов [%s], с круглыми комнатами [%s], со скруглением [%s], крыльев (вершин вне сетки): крыша [%s], пол [%s]"),
 	       *FString::FromInt(Runs), *FString::FromInt(RunsWithCircles),
 	       *FString::FromInt(RunsWithArc),
-	       *FString::FromInt(TotalRoofPlates), *FString::FromInt(TotalFloorPlates));
+	       *FString::FromInt(TotalRoofOffGrid), *FString::FromInt(TotalFloorOffGrid));
 
 	TestTrue(TEXT("хотя бы в одном прогоне есть круглая комната"), RunsWithCircles > 0);
 	TestTrue(TEXT("хотя бы в одном прогоне стены скруглены"), RunsWithArc > 0);
-	TestTrue(TEXT("за все прогоны есть плиты примыкания"), TotalRoofPlates + TotalFloorPlates > 0);
+	TestTrue(TEXT("за все прогоны крышки и пол дотянуты до стен"), TotalRoofOffGrid + TotalFloorOffGrid > 0);
 
 	const FString Dir = FPaths::ProjectSavedDir() / TEXT("AgentScratch");
 	const bool bDumpRequested = FParse::Param(FCommandLine::Get(), TEXT("dangenrounddump"));

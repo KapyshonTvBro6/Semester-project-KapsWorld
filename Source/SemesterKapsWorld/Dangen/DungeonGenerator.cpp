@@ -824,11 +824,13 @@ void ADungeonGenerator::ResetRoomTemplates()
 //  вписанный в ту же клетчатую область, как в макете.
 //
 //  Переставленная грань при этом не повисает: между ней и прежним ребром клетки
-//  остаётся полоса, и её накрывает плита — крышки (если полоса легла в клетку
-//  комнаты, где пол уже есть) или пола (если полоса легла в клетку камня, где
-//  крышка уже есть). Плита использует те же точки, что и кромка прежних плит и
-//  верхний/нижний край новой грани, поэтому стена примкнута к крыше, полу и
-//  соседним граням встык: оболочка без щелей, как у прямоугольных комнат.
+//  остаётся полоса, и её закрывает ТА ЖЕ крышка (или плита пола) клетки, чьё
+//  общее с соседом ребро заменено на ломаную по краю стены — крышка каменной
+//  клетки дотягивается до верхнего края грани, плита пола клетки комнаты — до
+//  нижнего. Отдельных плит примыкания нет: полигонов крыши и пола ровно столько
+//  же, сколько клеток они накрывают, а углы крыла — те же точки, что у края
+//  стены, поэтому стена соединена с крышей, полом и соседними гранями встык:
+//  оболочка без щелей, как у прямоугольных комнат.
 //
 //  Там, где переставленная грань легла бы поперёк входа или коридора, она
 //  остаётся на прежнем месте, а её углы у соседних переставленных граней
@@ -966,31 +968,29 @@ bool ADungeonGenerator::RoundChordCrossesPassage(float AX, float AY, float BX, f
 // не хватает плиты: в клетке комнаты пол есть, а крышки нет; в клетке камня
 // крышка есть, а пола нет.
 // Отсечь многоугольник полупрямой: остаются вершины и точки пересечения со
-// стороной Dot(X - P, N) <= 0. Нужен, чтобы полосу между прежним ребром клетки
-// и переставленной гранью разрезать по границе клетки: у разных сторон границы
-// разные покрытия (крышка над камнем, пол в комнате).
-static void ClipHalfPlane(TArray<FVector2D>& Poly, const FVector2D& P, const FVector2D& N)
+// стороной Dot(X - P, N) <= 0. Нужно, чтобы крыло клетки не лезло в чужую клетку:
+// у одного конца грани полоса может лежать по эту сторону ребра, а у другого —
+// по ту, и тогда наружу клетки идёт только часть полосы.
+// Углы клетки (X..X+1, Y..Y+1) в порядке обхода против часовой: ребро i идёт от
+// Corner[i] к Corner[i+1], соседняя клетка при этом остаётся справа от обхода.
+static const int32 RoundEdgeDX[4] = { 0, 1, 0, -1 };
+static const int32 RoundEdgeDY[4] = { -1, 0, 1, 0 };
+
+static void CellCorners(int32 X, int32 Y, FVector2D Out[4])
 {
-	TArray<FVector2D> Out;
-	Out.Reserve(Poly.Num() + 2);
-	const int32 Num = Poly.Num();
+	Out[0] = FVector2D(static_cast<float>(X), static_cast<float>(Y));
+	Out[1] = FVector2D(static_cast<float>(X + 1), static_cast<float>(Y));
+	Out[2] = FVector2D(static_cast<float>(X + 1), static_cast<float>(Y + 1));
+	Out[3] = FVector2D(static_cast<float>(X), static_cast<float>(Y + 1));
+}
 
-	for (int32 i = 0; i < Num; ++i)
+static int32 EdgeIndexOfDirection(int32 DX, int32 DY)
+{
+	for (int32 i = 0; i < 4; ++i)
 	{
-		const FVector2D& Cur = Poly[i];
-		const FVector2D& Next = Poly[(i + 1) % Num];
-
-		const float DC = FVector2D::DotProduct(Cur - P, N);
-		const float DN = FVector2D::DotProduct(Next - P, N);
-
-		if (DC <= 0.f) Out.Add(Cur);
-		if ((DC > 0.f) != (DN > 0.f))
-		{
-			Out.Add(Cur + (Next - Cur) * (DC / (DC - DN)));
-		}
+		if (RoundEdgeDX[i] == DX && RoundEdgeDY[i] == DY) return i;
 	}
-
-	Poly = MoveTemp(Out);
+	return -1;
 }
 
 static float PolygonSignedArea2(const TArray<FVector2D>& Poly)
@@ -1003,86 +1003,161 @@ static float PolygonSignedArea2(const TArray<FVector2D>& Poly)
 		const FVector2D& B = Poly[(i + 1) % Num];
 		Sum += A.X * B.Y - A.Y * B.X;
 	}
-	return Sum;   // удвоенная площадь со знаком
+	return Sum;   // удвоенная площадь со знаком: > 0 — обход против часовой
 }
 
-// Кусок полосы накрыть можно, только если он не заходит в проходимую клетку:
-// чужую комнату или коридор. Вершины полосы стоят на углах сетки, которые
-// общие для четырёх клеток, поэтому проверяем внутренние точки куска: центр
-// массы и середины сторон, сдвинутые к центру.
-static bool BandPieceInsideAllowed(const TArray<FVector2D>& Poly, const TArray<uint8>& Grid,
-                                   const TArray<int32>& RoomMap, const TArray<uint8>& RoadMask,
-                                   int32 GridW, int32 GridH, int32 RoomIndex)
+// Ломаную режем полуплоскостью: остаются участки с Dot(X - P, N) <= 0, на
+// границе появляется точка пересечения. Крылом режем саму переставленную грань
+// (хорду), а не четырёхугольник полосы: если хорда пересекла ребро клетки,
+// такой четырёхугольник самопересекающийся, и резать его нельзя.
+static void ClipLineHalfPlane(const TArray<FVector2D>& Line, const FVector2D& P, const FVector2D& N,
+                              TArray<FVector2D>& Out)
+{
+	Out.Reset();
+	Out.Reserve(Line.Num() + 1);
+
+	for (int32 i = 0; i < Line.Num(); ++i)
+	{
+		const FVector2D& Cur = Line[i];
+		const float DC = FVector2D::DotProduct(Cur - P, N);
+		const bool bCurIn = (DC <= 0.f);
+
+		if (i > 0)
+		{
+			const FVector2D& Prev = Line[i - 1];
+			const float DP = FVector2D::DotProduct(Prev - P, N);
+			if (bCurIn != (DP <= 0.f))
+			{
+				const float Denom = DP - DC;
+				if (FMath::Abs(Denom) > KINDA_SMALL_NUMBER)
+				{
+					Out.Add(Prev + (Cur - Prev) * (DP / Denom));
+				}
+			}
+		}
+
+		if (bCurIn) Out.Add(Cur);
+	}
+}
+
+// Ломаная крыла: часть переставленной грани (хорды A-B), оставленная по наружную
+// сторону ребра клетки (OutN) и не выходящая за границы этого ребра. Точки на
+// самой линии ребра в ломаную не входят — их берёт обход клетки. Порядок ломаной
+// подбирается по направлению обхода ребра (EdgeStart -> EdgeEnd), чтобы крыло не
+// вывернулось. Пустая ломаная значит, что крыла не нужно: полоса целиком осталась
+// внутри клетки, и её накрывает обычная плита этой клетки. Одна точка бывает,
+// когда хорда пересекла ребро: крыло тогда — треугольный «зуб».
+static void BandOuterChain(const FVector2D& A, const FVector2D& B,
+                           const FVector2D& EdgeStart, const FVector2D& EdgeEnd, const FVector2D& OutN,
+                           TArray<FVector2D>& Chain)
+{
+	Chain.Reset();
+
+	const FVector2D T = EdgeEnd - EdgeStart;
+
+	TArray<FVector2D> Chord;
+	Chord.Add(A); Chord.Add(B);
+
+	TArray<FVector2D> Step, Keep;
+	ClipLineHalfPlane(Chord, EdgeStart, -OutN, Step);   // наружная сторона ребра
+	ClipLineHalfPlane(Step, EdgeStart, -T, Keep);       // не дальше начала ребра
+	ClipLineHalfPlane(Keep, EdgeEnd, T, Step);          // и не дальше его конца
+
+	for (const FVector2D& Q : Step)
+	{
+		// точка на самом ребре: её уже даёт обход клетки
+		if (FMath::Abs(FVector2D::DotProduct(Q - EdgeStart, OutN)) < 1e-4f) continue;
+		Chain.Add(Q);
+	}
+
+	if (Chain.Num() < 1) return;
+
+	if (FVector2D::DotProduct(Chain[0] - EdgeStart, T) > FVector2D::DotProduct(Chain[Chain.Num() - 1] - EdgeStart, T))
+	{
+		for (int32 i = 0, j = Chain.Num() - 1; i < j; ++i, --j) Swap(Chain[i], Chain[j]);
+	}
+}
+
+static bool PointInTri(const FVector2D& P, const FVector2D& A, const FVector2D& B, const FVector2D& C)
+{
+	const float D1 = (B.X - A.X) * (P.Y - A.Y) - (B.Y - A.Y) * (P.X - A.X);
+	const float D2 = (C.X - B.X) * (P.Y - B.Y) - (C.Y - B.Y) * (P.X - B.X);
+	const float D3 = (A.X - C.X) * (P.Y - C.Y) - (A.Y - C.Y) * (P.X - C.X);
+
+	// обход против часовой: точка на ребре считается внутри, чтобы такой угол
+	// ухом не становился
+	const float Eps = -1e-4f;
+	return D1 >= Eps && D2 >= Eps && D3 >= Eps;
+}
+
+// Разрезание многоугольника «обрезкой ушей» (ear clipping): ухо — выпуклый угол,
+// в треугольник которого не попадает ни одна другая вершина. Клетка с крылом
+// невыпуклая, а веер от одной вершины в невыпуклом многоугольнике даёт
+// треугольники снаружи многоугольника — они и выглядели как чёрные дыры.
+// Индексы в OutTris — индексы вершин Poly.
+static int32 EarClipTriangulate(const TArray<FVector2D>& Poly, TArray<int32>& OutTris)
 {
 	const int32 Num = Poly.Num();
-	if (Num < 3) return false;
+	if (Num < 3) return 0;
 
-	FVector2D Center(0.f, 0.f);
-	for (const FVector2D& P : Poly) Center += P;
-	Center *= 1.f / static_cast<float>(Num);
+	TArray<int32> Ring;
+	Ring.Reserve(Num);
+	for (int32 i = 0; i < Num; ++i) Ring.Add(i);
 
-	auto Allowed = [&](const FVector2D& S) -> bool
+	int32 Guard = 0;
+	while (Ring.Num() > 3 && Guard++ < Num * 4)
 	{
-		const int32 CX = FMath::FloorToInt(S.X);
-		const int32 CY = FMath::FloorToInt(S.Y);
-		if (CX < 0 || CY < 0 || CX >= GridW || CY >= GridH) return false;
+		const int32 M = Ring.Num();
+		bool bCut = false;
 
-		const int32 I = CY * GridW + CX;
-		if (Grid[I] == 0) return true;                                     // камень: крышка над ним есть
-		if (RoomMap[I] != RoomIndex) return false;                         // открытая клетка чужой комнаты
-		if (RoadMask.Num() == GridW * GridH && RoadMask[I] != 0) return false;   // сквозь неё идёт коридор
-		return true;                                                       // открытая клетка этой комнаты
-	};
-
-	if (!Allowed(Center)) return false;
-
-	for (int32 i = 0; i < Num; ++i)
-	{
-		const FVector2D Mid = (Poly[i] + Poly[(i + 1) % Num]) * 0.5f;
-		if (!Allowed(Mid + (Center - Mid) * 0.25f)) return false;
-	}
-
-	return true;
-}
-
-int32 ADungeonGenerator::RoundBandSides(const FRoundFace& Face, int32 RoomIndex) const
-{
-	if ((Face.A - Face.A0).Size() < 0.02f && (Face.B - Face.B0).Size() < 0.02f)
-	{
-		return 0;   // грань никуда не сдвинулась: примыкания не нужно
-	}
-
-	const FWallDir& Dir = WallDirs[Face.DirIndex];
-	// нормаль грани смотрит внутрь комнаты; наружу - от клетки комнаты к камню
-	const FVector2D Out(-static_cast<float>(Dir.DX), -static_cast<float>(Dir.DY));
-
-	int32 Sides = 0;
-
-	// Кусок полосы в открытой клетке комнаты: пол там есть, крышки нет -> плита крышки.
-	{
-		TArray<FVector2D> Poly;
-		Poly.Add(Face.A0); Poly.Add(Face.B0); Poly.Add(Face.B); Poly.Add(Face.A);
-		ClipHalfPlane(Poly, Face.A0, Out);   // сторона открытой клетки: Dot(X - A0, Out) <= 0
-		if (Poly.Num() >= 3 && FMath::Abs(PolygonSignedArea2(Poly)) > 1e-4f)
+		for (int32 i = 0; i < M; ++i)
 		{
-			if (!BandPieceInsideAllowed(Poly, Grid, RoomMap, RoadMask, GridW, GridH, RoomIndex)) return 0;
-			Sides |= 1;
+			const int32 IA = Ring[(i + M - 1) % M];
+			const int32 IB = Ring[i];
+			const int32 IC = Ring[(i + 1) % M];
+
+			const FVector2D& A = Poly[IA];
+			const FVector2D& B = Poly[IB];
+			const FVector2D& C = Poly[IC];
+
+			const float Cross = (B.X - A.X) * (C.Y - B.Y) - (B.Y - A.Y) * (C.X - B.X);
+			if (Cross <= KINDA_SMALL_NUMBER) continue;   // рефлексивный или вырожденный угол
+
+			bool bOtherInside = false;
+			for (int32 j = 0; j < M; ++j)
+			{
+				const int32 IJ = Ring[j];
+				if (IJ == IA || IJ == IB || IJ == IC) continue;
+				if (PointInTri(Poly[IJ], A, B, C)) { bOtherInside = true; break; }
+			}
+			if (bOtherInside) continue;
+
+			OutTris.Add(IA);
+			OutTris.Add(IB);
+			OutTris.Add(IC);
+			Ring.RemoveAt(i);
+			bCut = true;
+			break;
+		}
+
+		if (!bCut) break;   // многоугольник самопересекающийся: дальше резать нельзя
+	}
+
+	if (Ring.Num() == 3)
+	{
+		const FVector2D& A = Poly[Ring[0]];
+		const FVector2D& B = Poly[Ring[1]];
+		const FVector2D& C = Poly[Ring[2]];
+		const float Cross = (B.X - A.X) * (C.Y - B.Y) - (B.Y - A.Y) * (C.X - B.X);
+		if (Cross > KINDA_SMALL_NUMBER)
+		{
+			OutTris.Add(Ring[0]);
+			OutTris.Add(Ring[1]);
+			OutTris.Add(Ring[2]);
 		}
 	}
 
-	// Кусок полосы в клетке камня: крышка там есть, а пола нет -> плита пола.
-	{
-		TArray<FVector2D> Poly;
-		Poly.Add(Face.A0); Poly.Add(Face.B0); Poly.Add(Face.B); Poly.Add(Face.A);
-		ClipHalfPlane(Poly, Face.A0, -Out);
-		if (Poly.Num() >= 3 && FMath::Abs(PolygonSignedArea2(Poly)) > 1e-4f)
-		{
-			if (!BandPieceInsideAllowed(Poly, Grid, RoomMap, RoadMask, GridW, GridH, RoomIndex)) return 0;
-			Sides |= 2;
-		}
-	}
-
-	return Sides;
+	return OutTris.Num() / 3;
 }
 
 void ADungeonGenerator::BuildRoundRooms(TArray<FRoundRoom>& OutRooms, TArray<uint8>& OutSkip) const
@@ -1173,29 +1248,11 @@ void ADungeonGenerator::BuildRoundRooms(TArray<FRoundRoom>& OutRooms, TArray<uin
 				{
 					F.A = F.A0;
 					F.B = F.B0;
-					F.BandSides = 0;
 					F.bArc = false;
 					bChanged = true;
 					continue;
 				}
 
-				// Полоса между прежним ребром клетки и новой гранью
-				// целиком по одну сторону границы: тогда её накрывает плита, общая
-				// с прежней крышкой или с прежним полом, и стена получается
-				// примкнутой к ним без щелей. Если полоса разошлась по обе стороны,
-				// примыкания не построить — грань остаётся на прежнем месте.
-				const int32 Bands = RoundBandSides(F, Room.Index);
-				if (Bands == 0)
-				{
-					F.A = F.A0;
-					F.B = F.B0;
-					F.BandSides = 0;
-					F.bArc = false;
-					bChanged = true;
-					continue;
-				}
-
-				F.BandSides = Bands;
 			}
 		}
 
@@ -1293,10 +1350,19 @@ void ADungeonGenerator::BuildGeometry()
 	//  Так тысячи отдельных квадратов превращаются в несколько больших плит.
 	// ================================================================
 	TArray<FIntRect> Rects;
-	auto CollectRects = [&](uint8 WantedValue)
+	auto CollectRects = [&](uint8 WantedValue, const TArray<uint8>* Skip = nullptr)
 	{
 		Rects.Reset();
 		if (Grid.Num() != GridW * GridH) return;
+
+		// клетка подходит, если она нужного типа и не накрыта своим полигоном с крылом
+		auto Fits = [&](int32 X, int32 Y) -> bool
+		{
+			const int32 I = Idx(X, Y);
+			if (Grid[I] != WantedValue) return false;
+			if (Skip && (*Skip)[I] != 0) return false;
+			return true;
+		};
 
 		TArray<uint8> Used;
 		Used.Init(0, GridW * GridH);
@@ -1305,11 +1371,11 @@ void ADungeonGenerator::BuildGeometry()
 		{
 			for (int32 X = 0; X < GridW; ++X)
 			{
-				if (Grid[Idx(X, Y)] != WantedValue || Used[Idx(X, Y)]) continue;
+				if (!Fits(X, Y) || Used[Idx(X, Y)]) continue;
 
 				// 1) растягиваем полосу по X
 				int32 RectW = 1;
-				while (X + RectW < GridW && Grid[Idx(X + RectW, Y)] == WantedValue && !Used[Idx(X + RectW, Y)])
+				while (X + RectW < GridW && Fits(X + RectW, Y) && !Used[Idx(X + RectW, Y)])
 					++RectW;
 
 				// 2) опускаем полосу по Y, пока весь ряд прямоугольника подходит
@@ -1319,7 +1385,7 @@ void ADungeonGenerator::BuildGeometry()
 					bool bWholeRow = true;
 					for (int32 i = 0; i < RectW; ++i)
 					{
-						if (Grid[Idx(X + i, Y + RectH)] != WantedValue || Used[Idx(X + i, Y + RectH)]) { bWholeRow = false; break; }
+						if (!Fits(X + i, Y + RectH) || Used[Idx(X + i, Y + RectH)]) { bWholeRow = false; break; }
 					}
 					if (!bWholeRow) break;
 					++RectH;
@@ -1398,7 +1464,8 @@ void ADungeonGenerator::BuildGeometry()
 	{
 		for (int32 i = 0; i < Poly.Num(); ++i) Poly[i] *= CS;
 
-		TArray<FVector2D, TInlineAllocator<8>> Clean;
+		TArray<FVector2D> Clean;
+		Clean.Reserve(Poly.Num());
 		for (const FVector2D& P : Poly)
 		{
 			if (Clean.Num() > 0 && (P - Clean[Clean.Num() - 1]).Size() < 1.f) continue;
@@ -1407,12 +1474,42 @@ void ADungeonGenerator::BuildGeometry()
 		if (Clean.Num() > 3 && (Clean[0] - Clean[Clean.Num() - 1]).Size() < 1.f) Clean.Pop();
 		if (Clean.Num() < 3) return 0;
 
-		const FVector2D E1 = Clean[1] - Clean[0];
-		const FVector2D E2 = Clean[2] - Clean[1];
-		if (E1.X * E2.Y - E1.Y * E2.X < 0.f)   // обход по часовой -> разворачиваем
+		// Ориентация — по знаку площади: первый угол клетки с крылом бывает
+		// рефлексивным, по нему направление обхода не определить.
+		if (PolygonSignedArea2(Clean) < 0.f)   // обход по часовой -> разворачиваем
 		{
 			for (int32 i = 0, j = Clean.Num() - 1; i < j; ++i, --j) Swap(Clean[i], Clean[j]);
 		}
+
+		// Точка пересечения крыла с границей клетки может совпасть с углом клетки
+		// или лечь вплотную к соседнему углу: такой угол не нужен, а без его удаления
+		// треугольник крыла выходит вырожденным (площадью в доли квадратного
+		// миллиметра) и плита начинает мигать.
+		for (int32 Pass = 0; Pass < 6; ++Pass)
+		{
+			const int32 RingNum = Clean.Num();
+			if (RingNum < 4) break;
+
+			bool bRemoved = false;
+			for (int32 i = 0; i < RingNum; ++i)
+			{
+				const FVector2D& Prev = Clean[(i + RingNum - 1) % RingNum];
+				const FVector2D& Cur = Clean[i];
+				const FVector2D& Next = Clean[(i + 1) % RingNum];
+
+				const float Cross = (Cur.X - Prev.X) * (Next.Y - Cur.Y) - (Cur.Y - Prev.Y) * (Next.X - Cur.X);
+				if (FMath::Abs(Cross) < 1e-3f)   // угол лежит на соседних рёбрах (в см^2)
+				{
+					Clean.RemoveAt(i);
+					bRemoved = true;
+					break;
+				}
+			}
+
+			if (!bRemoved) break;
+		}
+
+		if (Clean.Num() < 3) return 0;
 
 		const int32 BaseIdx = Verts.Num();
 		for (const FVector2D& P : Clean)
@@ -1422,53 +1519,103 @@ void ADungeonGenerator::BuildGeometry()
 			UVS.Add(FVector2D(UV(P.X), UV(P.Y)));
 		}
 
-		int32 Added = 0;
-		for (int32 i = 1; i + 1 < Clean.Num(); ++i)
-		{
-			const FVector2D& A = Clean[0];
-			const FVector2D& B = Clean[i];
-			const FVector2D& C = Clean[i + 1];
-			const float CrossZ = (B.X - A.X) * (C.Y - A.Y) - (B.Y - A.Y) * (C.X - A.X);
-			if (CrossZ < 1.f) continue;   // вырожденный или вывернутый треугольник не нужен (в см^2)
+		// Обрезка ушей, а не веер: клетка с крылом невыпуклая, а веер от одной
+		// вершины дал бы треугольники снаружи многоугольника (чёрные дыры в крышке).
+		TArray<int32> LocalTris;
+		LocalTris.Reserve((Clean.Num() - 2) * 3);
+		const int32 Added = EarClipTriangulate(Clean, LocalTris);
 
-			Tris.Add(BaseIdx + 0);
-			Tris.Add(BaseIdx + i);
-			Tris.Add(BaseIdx + i + 1);
-			++Added;
-		}
+		for (const int32 I : LocalTris) Tris.Add(BaseIdx + I);
 
 		return Added;
 	};
 
-	// Плиты примыкания стен круглых комнат: полоса между прежним ребром клетки и
-	// переставленной гранью. Её внешние углы - ровно углы прежних крышек или плит
-	// пола, внутренние - ровно углы новой грани стены, поэтому стена примкнута к
-	// крыше и полу встык, как и грани прямоугольных комнат.
-	auto AddRoundBandPlates = [&](TArray<FVector>& Verts, TArray<int32>& Tris, TArray<FVector>& Norms,
-		                          TArray<FVector2D>& UVS, float Height, int32 NeedSide) -> int32
+	// Крыло клетки. Клетка, у которой на ребре стоит переставленная граня стены,
+	// не берётся из общего объединения прямоугольников: вместо этого её крышка
+	// (или плита пола) строится ТЕМ ЖЕ полигоном клетки, у которого сторона, общая
+	// с соседом, заменена на ломаную «угол клетки -> край стены -> угол клетки».
+	// Крышка дотягивается до стены: отдельной плиты нет, меняется форма той же
+	// крышки, а углы крыла — ровно те же точки, что у верхнего (или нижнего) края
+	// грани стены, то есть шов общий и щели не остаётся. Крыло торчит в клетку,
+	// которую эта поверхность покрывать и не должна (крышка — в открытую клетку
+	// комнаты, пол — в клетку камня), поэтому плиты одного уровня не перекрывают
+	// друг друга.
+	auto AddRoundCellPlate = [&](TArray<FVector>& Verts, TArray<int32>& Tris, TArray<FVector>& Norms,
+		                         TArray<FVector2D>& UVS, int32 X, int32 Y, float Height, bool bRockCell) -> int32
 	{
-		int32 Plates = 0;
+		FVector2D Corner[4];
+		CellCorners(X, Y, Corner);
 
+		const FRoundFace* FaceOnEdge[4] = { nullptr, nullptr, nullptr, nullptr };
 		for (const FRoundRoom& R : RoundRooms)
 		{
 			for (const FRoundFace& F : R.Faces)
 			{
-				if (!F.bArc || (F.BandSides & NeedSide) == 0) continue;
+				if (!F.bArc) continue;
 
 				const FWallDir& Dir = WallDirs[F.DirIndex];
-				const FVector2D Out(-static_cast<float>(Dir.DX), -static_cast<float>(Dir.DY));
+				// крышка — у каменной клетки (её сосед по ребру открыт), пол — у
+				// открытой клетки комнаты (её сосед по ребру — камень)
+				const int32 CX = bRockCell ? F.RockCell.X : F.RockCell.X + Dir.DX;
+				const int32 CY = bRockCell ? F.RockCell.Y : F.RockCell.Y + Dir.DY;
+				if (CX != X || CY != Y) continue;
 
-				// Полосу режем по границе клетки: этот случай берём свою половину.
-				// координаты в клетках: AddFlatPolyCM сам переведёт их в сантиметры
-				TArray<FVector2D> Poly;
-				Poly.Add(F.A0); Poly.Add(F.B0); Poly.Add(F.B); Poly.Add(F.A);
-				ClipHalfPlane(Poly, F.A0, NeedSide == 1 ? Out : -Out);
-
-				if (AddFlatPolyCM(Verts, Tris, Norms, UVS, Poly, Height) > 0) ++Plates;
+				const int32 Edge = EdgeIndexOfDirection(bRockCell ? Dir.DX : -Dir.DX, bRockCell ? Dir.DY : -Dir.DY);
+				if (Edge >= 0) FaceOnEdge[Edge] = &F;
 			}
 		}
 
-		return Plates;
+		TArray<FVector2D> Poly;
+		Poly.Reserve(12);
+		for (int32 i = 0; i < 4; ++i)
+		{
+			Poly.Add(Corner[i]);
+
+			const FRoundFace* F = FaceOnEdge[i];
+			if (!F) continue;
+
+			const FVector2D OutN(static_cast<float>(RoundEdgeDX[i]), static_cast<float>(RoundEdgeDY[i]));
+			TArray<FVector2D> Chain;
+			BandOuterChain(F->A, F->B, Corner[i], Corner[(i + 1) % 4], OutN, Chain);
+			for (const FVector2D& Q : Chain) Poly.Add(Q);
+		}
+
+		return AddFlatPolyCM(Verts, Tris, Norms, UVS, Poly, Height);
+	};
+
+	// Пометить клетки, которым нужно крыло: их нельзя забирать общим объединением
+	// прямоугольников — их накроет их же полигон с крылом. Крыла нет, если полоса
+	// целиком осталась внутри самой клетки (тогда достаточно обычной плиты).
+	auto BuildRoundCellMarks = [&](bool bRockCell) -> TArray<uint8>
+	{
+		TArray<uint8> Mark;
+		Mark.Init(0, GridW * GridH);
+		if (Grid.Num() != GridW * GridH) return Mark;
+
+		TArray<FVector2D> Chain;
+		for (const FRoundRoom& R : RoundRooms)
+		{
+			for (const FRoundFace& F : R.Faces)
+			{
+				if (!F.bArc) continue;
+
+				const FWallDir& Dir = WallDirs[F.DirIndex];
+				const int32 CX = bRockCell ? F.RockCell.X : F.RockCell.X + Dir.DX;
+				const int32 CY = bRockCell ? F.RockCell.Y : F.RockCell.Y + Dir.DY;
+				if (!InBounds(CX, CY)) continue;
+
+				const int32 Edge = EdgeIndexOfDirection(bRockCell ? Dir.DX : -Dir.DX, bRockCell ? Dir.DY : -Dir.DY);
+				if (Edge < 0) continue;
+
+				FVector2D Corner[4];
+				CellCorners(CX, CY, Corner);
+				const FVector2D OutN(static_cast<float>(RoundEdgeDX[Edge]), static_cast<float>(RoundEdgeDY[Edge]));
+				BandOuterChain(F.A, F.B, Corner[Edge], Corner[(Edge + 1) % 4], OutN, Chain);
+				if (Chain.Num() > 0) Mark[Idx(CX, CY)] = 1;
+			}
+		}
+
+		return Mark;
 	};
 
 	// =====================================================================
@@ -1718,7 +1865,8 @@ void ADungeonGenerator::BuildGeometry()
 	// квадрата на каждую клетку по всему полю — несколько больших плит.
 	if (bBuildRoof && RoofMesh)
 	{
-		CollectRects(0);   // какие клетки нужно накрыть
+		const TArray<uint8> RoofMark = BuildRoundCellMarks(true);   // клетки камня с крылом
+		CollectRects(0, &RoofMark);   // какие клетки нужно накрыть
 
 		TArray<FVector> RoofVerts;
 		TArray<int32> RoofTris;
@@ -1733,13 +1881,32 @@ void ADungeonGenerator::BuildGeometry()
 		for (const FIntRect& R : Rects)
 			AddFlatRect(RoofVerts, RoofTris, RoofNormals, RoofUVs, R, WH, RoofCells);
 
-		// Примыкания стен круглых комнат: если полоса между прежним ребром клетки и
-		// переставленной гранью легла в открытую клетку комнаты, пол там уже есть, а
-		// крышки нет — полосу накрывает плита крышки на той же высоте WH. Её внешняя
-		// сторона лежит ровно на прежней кромке крышки, внутренняя — ровно на верхнем
-		// крае стены, поэтому кромка крышки снова совпадает с верхом стен и щелей
-		// над стеной не остаётся.
-		const int32 RoofBands = AddRoundBandPlates(RoofVerts, RoofTris, RoofNormals, RoofUVs, WH, 1);
+		// Крышки клеток с крыльями: сторона крышки, общая с открытой клеткой комнаты,
+		// заменена на ломаную по верхнему краю переставленной грани стены. Кромка
+		// крышки снова совпадает с верхом стен, щелей над стеной не остаётся.
+		int32 RoofWings = 0;
+		for (int32 Y = 0; Y < GridH; ++Y)
+		{
+			for (int32 X = 0; X < GridW; ++X)
+			{
+				if (RoofMark[Idx(X, Y)] == 0) continue;
+
+				if (AddRoundCellPlate(RoofVerts, RoofTris, RoofNormals, RoofUVs, X, Y, WH, true) > 0)
+				{
+					++RoofWings;
+				}
+				else
+				{
+					// крыло построить не удалось — берём обычную крышку клетки,
+					// чтобы в покрытии не осталось дыры
+					AddFlatQuadCM(RoofVerts, RoofTris, RoofNormals, RoofUVs,
+					              static_cast<float>(X) * CS, static_cast<float>(Y) * CS,
+					              static_cast<float>(X + 1) * CS, static_cast<float>(Y + 1) * CS, WH);
+				}
+
+				++RoofCells;
+			}
+		}
 
 		if (RoofVerts.Num() > 0)
 		{
@@ -1748,8 +1915,8 @@ void ADungeonGenerator::BuildGeometry()
 			RoofMesh->SetMeshSectionVisible(0, true);
 		}
 
-		UE_LOG(LogTemp, Log, TEXT("Dungeon roof: %d плит накрыли %d клеток (по-старому было бы %d квадратов), примыканий к круглым стенам %d, %d vertices, %d triangles"),
-		       Rects.Num(), RoofCells, RoofCells, RoofBands, RoofVerts.Num(), RoofTris.Num() / 3);
+		UE_LOG(LogTemp, Log, TEXT("Dungeon roof: %d плит (%d общих + %d с крылом до стены) накрыли %d клеток, %d vertices, %d triangles"),
+		       Rects.Num() + RoofWings, Rects.Num(), RoofWings, RoofCells, RoofVerts.Num(), RoofTris.Num() / 3);
 
 		if (ArcFaces > 0)
 			UE_LOG(LogTemp, Log, TEXT("Dungeon round walls: круглых комнат %d, граней переставлено на эллипс %d, у входов и коридоров осталось на месте %d"),
@@ -1772,10 +1939,11 @@ void ADungeonGenerator::BuildGeometry()
 		TArray<FVector2D> FloorUVs;
 
 		int32 FloorCells = 0;
-		int32 FloorBands = 0;   // заполняется ниже, в блоке пола
+		int32 FloorWings = 0;   // заполняется ниже, в блоке пола
 		if (bBuildFloor)
 		{
-			CollectRects(1);
+			const TArray<uint8> FloorMark = BuildRoundCellMarks(false);   // клетки комнат с крылом
+			CollectRects(1, &FloorMark);
 			FloorVerts.Reserve(Rects.Num() * 4);
 			FloorTris.Reserve(Rects.Num() * 6);
 			FloorNormals.Reserve(Rects.Num() * 4);
@@ -1784,12 +1952,29 @@ void ADungeonGenerator::BuildGeometry()
 			for (const FIntRect& R : Rects)
 				AddFlatRect(FloorVerts, FloorTris, FloorNormals, FloorUVs, R, 0.f, FloorCells);
 
-			// Примыкания с обратной стороны стены: если полоса легла в клетку камня,
-			// крышка над камнем уже есть, а пола нет — полосу закрывает плита пола на
-			// высоте 0. Её внешняя сторона лежит на прежней кромке плит пола,
-			// внутренняя — ровно на нижнем крае стены, то есть стена стоит НА полу,
-			// а не висит над ямой.
-			FloorBands = AddRoundBandPlates(FloorVerts, FloorTris, FloorNormals, FloorUVs, 0.f, 2);
+			// Пол клеток с крыльями: сторона плиты, общая с клеткой камня, заменена
+			// на ломаную по нижнему краю той же грани стены, то есть пол дотянут до
+			// стены, и стена стоит НА полу, а не висит над ямой.
+			for (int32 Y = 0; Y < GridH; ++Y)
+			{
+				for (int32 X = 0; X < GridW; ++X)
+				{
+					if (FloorMark[Idx(X, Y)] == 0) continue;
+
+					if (AddRoundCellPlate(FloorVerts, FloorTris, FloorNormals, FloorUVs, X, Y, 0.f, false) > 0)
+					{
+						++FloorWings;
+					}
+					else
+					{
+						AddFlatQuadCM(FloorVerts, FloorTris, FloorNormals, FloorUVs,
+						              static_cast<float>(X) * CS, static_cast<float>(Y) * CS,
+						              static_cast<float>(X + 1) * CS, static_cast<float>(Y + 1) * CS, 0.f);
+					}
+
+					++FloorCells;
+				}
+			}
 		}
 
 		if (FloorVerts.Num() > 0)
@@ -1799,8 +1984,8 @@ void ADungeonGenerator::BuildGeometry()
 			FloorMesh->SetMeshSectionVisible(0, true);
 		}
 
-		UE_LOG(LogTemp, Log, TEXT("Dungeon floor: %d плит на %d клеток, примыканий к круглым стенам %d, %d vertices, %d triangles"),
-		       bBuildFloor ? Rects.Num() : 0, FloorCells, FloorBands, FloorVerts.Num(), FloorTris.Num() / 3);
+		UE_LOG(LogTemp, Log, TEXT("Dungeon floor: %d плит (%d общих + %d с крылом до стены) на %d клеток, %d vertices, %d triangles"),
+		       bBuildFloor ? Rects.Num() + FloorWings : 0, bBuildFloor ? Rects.Num() : 0, FloorWings, FloorCells, FloorVerts.Num(), FloorTris.Num() / 3);
 	}
 
 	// Старая растянутая плоскость пола больше не участвует: прячем её, но материал,
