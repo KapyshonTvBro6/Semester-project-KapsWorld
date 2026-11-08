@@ -404,7 +404,10 @@ private:
 	{
 		FVector2D A0, B0;      // концы грани, как их даёт сетка
 		FVector2D A, B;        // куда эти концы переставлены (на эллипсе)
+		int32     CornerA = -1;// индекс узла сетки конца A: CY * (GridW + 1) + CX
+		int32     CornerB = -1;// то же для конца B
 		FIntPoint RockCell;    // клетка камня, чью грань переставляем
+		FIntPoint OpenCell;    // открытая клетка комнаты, которой принадлежит грань
 		int32     DirIndex = 0;// направление грани камня (индекс в WallDirs)
 		bool      bArc = true; // false = грань осталась на прежнем месте (у входа/коридора)
 		float     MidAngle = 0.f; // угол середины грани: по нему идёт обход по кругу
@@ -422,7 +425,11 @@ private:
 	bool RoundChordCrossesPassage(float AX, float AY, float BX, float BY, int32 RoomIndex) const;
 	// Грани круглых комнат + маска GridW*GridH*4: 1 = прежнюю грань этой клетки
 	// камня на этом направлении ставить уже не нужно, её заменила переставленная.
-	void BuildRoundRooms(TArray<FRoundRoom>& OutRooms, TArray<uint8>& OutSkip) const;
+	// Переставляются УЗЛЫ сетки, а не полигоны: OutCornerPos/OutCornerMoved — новое
+	// положение узла (в клетках), общее для грани стены, крышки клетки камня и плиты
+	// пола клетки комнаты. Индекс узла: CY * (GridW + 1) + CX.
+	void BuildRoundRooms(TArray<FRoundRoom>& OutRooms, TArray<uint8>& OutSkip,
+	                     TArray<FVector2D>& OutCornerPos, TArray<uint8>& OutCornerMoved) const;
 
 	int32 Rnd(int32 Min, int32 Max) { return Min + Stream.RandHelper(FMath::Max(1, Max - Min + 1)); }
 	void ShufflePoints(TArray<FIntPoint>& Arr);
