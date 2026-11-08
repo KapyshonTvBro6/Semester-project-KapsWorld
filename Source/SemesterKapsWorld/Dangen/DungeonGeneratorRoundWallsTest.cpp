@@ -642,8 +642,9 @@ bool FDangenRoundWallsTest::RunTest(const FString& Parameters)
 		CountWinding(FloorSec, FloorWithNorm, FloorAgainstNorm);
 
 		// Шов там, где поверхности соприкасаются, обязан быть общим: угол крышки или
-		// плиты пола, вышедший за клетки сетки, стоит ровно на вершине стены, а
-		// низ и верх переставленной грани — ровно на вершинах пола и крышки.
+		// плиты пола, вышедший за клетки сетки, стоит ровно на вершине стены, а низ и
+		// верх переставленной грани — на кромке пола и крышки (на её вершине или на её
+		// ребре: плита обрывается ровно по стене и за стену не высунута).
 		const TSet<FIntPoint> WallKeys  = MeshXYKeys(WallsSec);
 		const TSet<FIntPoint> RoofKeys  = MeshXYKeys(RoofSec);
 		const TSet<FIntPoint> FloorKeys = MeshXYKeys(FloorSec);
@@ -664,15 +665,91 @@ bool FDangenRoundWallsTest::RunTest(const FString& Parameters)
 			}
 		}
 
+		// Кромка плиты — это рёбра треугольников пола и крышки. Точка стены обязана
+		// стоять на такой кромке: либо на её вершине, либо на её ребре (вершина плиты
+		// иногда сливается с соседней, и тогда угол стены лежит внутри ребра плиты).
+		auto OnPlateEdge = [](const FProcMeshSection* Sec, const FVector& Pos) -> bool
+		{
+			if (!Sec) return false;
+			const double PX = Pos.X, PY = Pos.Y;
+			const double Tol = 1.0;   // сантиметр на клетке в 100 см — допустимый допуск
+			for (int32 i = 0; i + 2 < Sec->ProcIndexBuffer.Num(); i += 3)
+			{
+				const FVector* C[3] =
+				{
+					&Sec->ProcVertexBuffer[Sec->ProcIndexBuffer[i]].Position,
+					&Sec->ProcVertexBuffer[Sec->ProcIndexBuffer[i + 1]].Position,
+					&Sec->ProcVertexBuffer[Sec->ProcIndexBuffer[i + 2]].Position,
+				};
+				for (int32 e = 0; e < 3; ++e)
+				{
+					const FVector& S = *C[e];
+					const FVector& E = *C[(e + 1) % 3];
+					const double DX = E.X - S.X, DY = E.Y - S.Y;
+					const double L2 = DX * DX + DY * DY;
+					if (L2 < 1e-9) continue;
+					const double T = ((PX - S.X) * DX + (PY - S.Y) * DY) / L2;
+					if (T < -1e-4 || T > 1.0 + 1e-4) continue;
+					if (FMath::Abs(PX - (S.X + T * DX)) <= Tol && FMath::Abs(PY - (S.Y + T * DY)) <= Tol) return true;
+				}
+			}
+			return false;
+		};
+
 		int32 ArcLoose = 0;
 		for (const FQuad4& Q : Quads)
 		{
 			if (!OffGrid(Q.BotA->Position, Cell) && !OffGrid(Q.BotB->Position, Cell)) continue;
 			for (const FProcMeshVertex* V : { Q.BotA, Q.BotB, Q.TopA, Q.TopB })
 			{
-				const bool bOnFloor = FloorKeys.Contains(XYKey(V->Position));
-				const bool bOnRoof  = RoofKeys.Contains(XYKey(V->Position));
+				const bool bOnFloor = FloorKeys.Contains(XYKey(V->Position)) || OnPlateEdge(FloorSec, V->Position);
+				const bool bOnRoof  = RoofKeys.Contains(XYKey(V->Position)) || OnPlateEdge(RoofSec, V->Position);
 				if (!bOnFloor || !bOnRoof) ++ArcLoose;
+			}
+		}
+
+		// Лишних полигонов за стеной быть не должно: вершина плиты, лежащая у края
+		// грани стены, обязана стоять со своей стороны от её плоскости (пол — со
+		// стороны комнаты, крышка — со стороны камня). Нормаль грани стены смотрит
+		// в комнату, поэтому знак смещения говорит, в какую сторону высунута плита.
+		const double NearWall = 0.05 * static_cast<double>(Cell);   // у края грани стены
+		auto SideOfNearestWall = [&](const FVector& Pos) -> double
+		{
+			const double PX = Pos.X, PY = Pos.Y;
+			double Best = 1e30, BestSide = 0.0;
+			for (const FQuad4& Q : Quads)
+			{
+				const double AX = Q.BotA->Position.X, AY = Q.BotA->Position.Y;
+				const double BX = Q.BotB->Position.X, BY = Q.BotB->Position.Y;
+				const double DX = BX - AX, DY = BY - AY;
+				const double L2 = DX * DX + DY * DY;
+				double T = 0.0;
+				if (L2 > 1e-9) T = FMath::Clamp(((PX - AX) * DX + (PY - AY) * DY) / L2, 0.0, 1.0);
+				const double QX = AX + T * DX, QY = AY + T * DY;
+				const double D = FMath::Sqrt((PX - QX) * (PX - QX) + (PY - QY) * (PY - QY));
+				if (D < Best)
+				{
+					Best = D;
+					const FVector& N = Q.BotA->Normal;
+					BestSide = (PX - QX) * (double)N.X + (PY - QY) * (double)N.Y;   // >0 = со стороны комнаты
+				}
+			}
+			return Best <= NearWall ? BestSide : 0.0;   // вдали от стены смещение не меряем
+		};
+
+		int32 FloorUnderRock = 0, RoofOverRoom = 0;
+		if (FloorSec)
+		{
+			for (const FProcMeshVertex& V : FloorSec->ProcVertexBuffer)
+			{
+				if (SideOfNearestWall(V.Position) < -1.0) ++FloorUnderRock;   // пол ушёл в камень
+			}
+		}
+		if (RoofSec)
+		{
+			for (const FProcMeshVertex& V : RoofSec->ProcVertexBuffer)
+			{
+				if (SideOfNearestWall(V.Position) > 1.0) ++RoofOverRoom;      // крышка залезла в комнату
 			}
 		}
 
@@ -781,11 +858,12 @@ bool FDangenRoundWallsTest::RunTest(const FString& Parameters)
 		       *FString::FromInt(RoofGaps), *FString::FromInt(FloorGaps),
 		       *FString::FromInt(RoofCovered), *FString::FromInt(RockCells),
 		       *FString::FromInt(FloorCovered), *FString::FromInt(CarvedCells));
-		UE_LOG(LogTemp, Display, TEXT("DangenTest: ключ [%s]: сварено — повторных вершин: стены [%s], крыша [%s], пол [%s]; треугольников против нормали: стены [%s], крыша [%s], пол [%s]; швов вне сетки: крышка [%s], плита [%s], концы граней дуги [%s]"),
+		UE_LOG(LogTemp, Display, TEXT("DangenTest: ключ [%s]: сварено — повторных вершин: стены [%s], крыша [%s], пол [%s]; треугольников против нормали: стены [%s], крыша [%s], пол [%s]; швов вне сетки: крышка [%s], плита [%s], концы граней дуги [%s]; за стеной: пол [%s], крышка [%s]"),
 		       *FString::FromInt(Cfg.Seed),
 		       *FString::FromInt(WallDups), *FString::FromInt(RoofDups), *FString::FromInt(FloorDups),
 		       *FString::FromInt(WallAgainstNorm), *FString::FromInt(RoofAgainstNorm), *FString::FromInt(FloorAgainstNorm),
-		       *FString::FromInt(RoofLoose), *FString::FromInt(FloorLoose), *FString::FromInt(ArcLoose));
+		       *FString::FromInt(RoofLoose), *FString::FromInt(FloorLoose), *FString::FromInt(ArcLoose),
+		       *FString::FromInt(FloorUnderRock), *FString::FromInt(RoofOverRoom));
 
 		if (ArcVerts > 0) ++RunsWithArc;
 		TotalOffGrid += RoofOffGrid + FloorOffGrid;
@@ -823,7 +901,9 @@ bool FDangenRoundWallsTest::RunTest(const FString& Parameters)
 
 			TestEqual(TEXT("каждый угол крышки вне сетки стоит ровно на вершине стены"), RoofLoose, 0);
 			TestEqual(TEXT("каждый угол плиты пола вне сетки стоит ровно на вершине стены"), FloorLoose, 0);
-			TestEqual(TEXT("низ и верх переставленной грани стоят на вершинах пола и крышки (одна точка на три поверхности)"), ArcLoose, 0);
+			TestEqual(TEXT("низ и верх переставленной грани стоят на кромке пола и крышки (стена опирается на плиты)"), ArcLoose, 0);
+			TestEqual(TEXT("пол не высунут за стену наружу (его вершины у стены — со стороны комнаты)"), FloorUnderRock, 0);
+			TestEqual(TEXT("крышка не нависает над комнатой (её вершины у стены — со стороны камня)"), RoofOverRoom, 0);
 
 			// Скругление не имеет права менять проходы подземелья.
 			TestEqual(TEXT("в проходе не исчезла стена"), PassOpened, 0);

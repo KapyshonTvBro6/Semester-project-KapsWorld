@@ -1527,6 +1527,29 @@ void ADungeonGenerator::BuildRoundRooms(TArray<FRoundRoom>& OutRooms, TArray<uin
 					Reject[r][f] = 1;
 					continue;
 				}
+				// как эта грань будет построена стеной на самом деле: её концы берут
+				// положение узлов сетки — прежнее или переставленное, поэтому проверять
+				// нужно фактическое положение грани, а не только её принятый вариант. Иначе
+				// грань, оставленная на сетке из-за соседнего угла, всё равно съезжала бы
+				// одним концом за переставленным соседом и перерезала бы проход.
+				const FVector2D RealA = HasMove[F.CornerA] ? Proposal[F.CornerA] : F.A0;
+				const FVector2D RealB = HasMove[F.CornerB] ? Proposal[F.CornerB] : F.B0;
+				if ((RealB - RealA).Size() >= 0.02f &&
+				    (RoundChordCrossesPassage(RealA.X, RealA.Y, RealB.X, RealB.Y, R.RoomIndex) ||
+				     ChordSealsPassage(RealA, RealB)))
+				{
+					// в любом виде эта грань перекрыла бы проход — держим на сетке её углы
+					F.A = F.A0;
+					F.B = F.B0;
+					Reject[r][f] = 1;
+					NoMove[F.CornerA] = 1;
+					NoMove[F.CornerB] = 1;
+					HasMove[F.CornerA] = 0;
+					HasMove[F.CornerB] = 0;
+					bChanged = true;
+					continue;
+				}
+
 				if (NoMove[F.CornerA] || NoMove[F.CornerB])
 				{
 					// сосед этого угла стоит по-старему — держим на сетке и свою грань
