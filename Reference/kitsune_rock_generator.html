@@ -1,0 +1,765 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Kitsune Yuki — генератор скал и данжей</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0;
+    padding: 16px;
+    font-family: system-ui, sans-serif;
+    background: #0d0f13;
+    color: #e8e2d8;
+  }
+  h1 {
+    margin: 0 0 12px;
+    font-size: 20px;
+    color: #ffb36b;
+  }
+  .panel {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 18px;
+    align-items: center;
+    background: #151821;
+    border: 1px solid #2a3040;
+    border-radius: 14px;
+    padding: 12px;
+    margin-bottom: 14px;
+  }
+  label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: #cfd6e6;
+  }
+  input[type="range"] { width: 150px; }
+  input[type="number"], select, button {
+    background: #0d1017;
+    color: #e8e2d8;
+    border: 1px solid #39415a;
+    border-radius: 8px;
+    padding: 5px 8px;
+  }
+  button {
+    cursor: pointer;
+    background: #232a3a;
+  }
+  button:hover { background: #2f3950; }
+  #status {
+    width: 100%;
+    color: #98a4c0;
+    font-size: 12px;
+    min-height: 18px;
+  }
+  .canvases {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  figure {
+    margin: 0;
+    background: #12141b;
+    border: 1px solid #2a3040;
+    border-radius: 12px;
+    padding: 8px;
+  }
+  figcaption {
+    font-size: 12px;
+    color: #98a4c0;
+    margin-bottom: 6px;
+  }
+  canvas {
+    width: 260px;
+    height: 260px;
+    image-rendering: pixelated;
+    border-radius: 8px;
+    background: #000;
+    display: block;
+  }
+</style>
+</head>
+<body>
+<h1>🦊 Кицунэ Юки — генератор скальных текстур и нормалей</h1>
+
+<div class="panel">
+  <label>
+    Материал
+    <select id="preset">
+      <option value="granite" selected>Гранит</option>
+      <option value="basalt">Базальт</option>
+      <option value="sandstone">Пещерный песчаник</option>
+      <option value="mossyCave">Мшистая пещера</option>
+      <option value="wetCave">Мокрая пещера</option>
+      <option value="dungeonBricks">Кирпичный данж</option>
+      <option value="lavaVeins">Лавовые жилы</option>
+      <option value="crystalCave">Кристальная пещера</option>
+    </select>
+  </label>
+
+  <label>
+    Размер
+    <select id="size">
+      <option>256</option>
+      <option selected>512</option>
+      <option>1024</option>
+    </select>
+  </label>
+
+  <label>
+    Seed
+    <input id="seed" type="number" value="1337" style="width:90px">
+    <button id="randomSeed" title="Случайный seed">🎲</button>
+  </label>
+
+  <label>Масштаб <input id="scale" type="range" min="2" max="16" step="0.1" value="6.5"><span id="scaleVal"></span></label>
+  <label>Октавы <input id="octaves" type="range" min="1" max="8" step="1" value="7"><span id="octavesVal"></span></label>
+  <label>Рельеф <input id="relief" type="range" min="0" max="1" step="0.01" value="0.62"><span id="reliefVal"></span></label>
+  <label>Трещины <input id="cracks" type="range" min="0" max="1" step="0.01" value="0.28"><span id="cracksVal"></span></label>
+  <label>Слоистость <input id="strata" type="range" min="0" max="1" step="0.01" value="0.12"><span id="strataVal"></span></label>
+  <label>Влага <input id="moisture" type="range" min="0" max="1" step="0.01" value="0.08"><span id="moistureVal"></span></label>
+  <label>Мох <input id="moss" type="range" min="0" max="1" step="0.01" value="0.05"><span id="mossVal"></span></label>
+  <label>Шероховатость <input id="roughness" type="range" min="0" max="1" step="0.01" value="0.72"><span id="roughnessVal"></span></label>
+  <label>Кирпичи/данж <input id="brick" type="range" min="0" max="1" step="0.01" value="0"><span id="brickVal"></span></label>
+  <label>Вены/лава/кристаллы <input id="veins" type="range" min="0" max="1" step="0.01" value="0"><span id="veinsVal"></span></label>
+  <label>Сила нормалей <input id="normalStrength" type="range" min="0" max="8" step="0.1" value="2.5"><span id="normalStrengthVal"></span></label>
+  <label>AO <input id="aoStrength" type="range" min="0" max="1" step="0.01" value="0.55"><span id="aoStrengthVal"></span></label>
+
+  <label>
+    <input id="invertY" type="checkbox">
+    Инвертировать Y нормали
+  </label>
+
+  <button id="generate">Сгенерировать</button>
+  <button id="download">Скачать PNG</button>
+
+  <div id="status">Готово.</div>
+</div>
+
+<div class="canvases">
+  <figure><figcaption>Base Color</figcaption><canvas id="baseCanvas" width="512" height="512"></canvas></figure>
+  <figure><figcaption>Normal</figcaption><canvas id="normalCanvas" width="512" height="512"></canvas></figure>
+  <figure><figcaption>Roughness</figcaption><canvas id="roughCanvas" width="512" height="512"></canvas></figure>
+  <figure><figcaption>Ambient Occlusion</figcaption><canvas id="aoCanvas" width="512" height="512"></canvas></figure>
+  <figure><figcaption>Height</figcaption><canvas id="heightCanvas" width="512" height="512"></canvas></figure>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+const canvasMap = {
+  base: $('baseCanvas'),
+  normal: $('normalCanvas'),
+  rough: $('roughCanvas'),
+  ao: $('aoCanvas'),
+  height: $('heightCanvas')
+};
+
+const ctxMap = {};
+for (const key in canvasMap) {
+  ctxMap[key] = canvasMap[key].getContext('2d', { willReadFrequently: true });
+}
+
+const PRESETS = {
+  granite: {
+    scale: 6.5, octaves: 7, relief: 0.62, cracks: 0.28, strata: 0.12,
+    moisture: 0.08, moss: 0.05, roughness: 0.72, brick: 0, veins: 0,
+    colors: ['#221f1d', '#4c4743', '#7c746c', '#b7aca1'],
+    moss: '#4d7038',
+    vein: '#d8d8d8'
+  },
+  basalt: {
+    scale: 5.2, octaves: 7, relief: 0.78, cracks: 0.72, strata: 0.18,
+    moisture: 0.12, moss: 0.02, roughness: 0.64, brick: 0, veins: 0,
+    colors: ['#0c0d10', '#22252a', '#41464d', '#707780'],
+    moss: '#31502b',
+    vein: '#2b2f36'
+  },
+  sandstone: {
+    scale: 7.2, octaves: 6, relief: 0.48, cracks: 0.22, strata: 0.72,
+    moisture: 0.05, moss: 0.03, roughness: 0.82, brick: 0, veins: 0,
+    colors: ['#3d2817', '#7a4d27', '#c08d52', '#ecd0a1'],
+    moss: '#616b2f',
+    vein: '#a67c4f'
+  },
+  mossyCave: {
+    scale: 5.8, octaves: 7, relief: 0.70, cracks: 0.45, strata: 0.20,
+    moisture: 0.55, moss: 0.85, roughness: 0.83, brick: 0, veins: 0,
+    colors: ['#151a12', '#2c3524', '#556043', '#8d9872'],
+    moss: '#3f7030',
+    vein: '#7ba17d'
+  },
+  wetCave: {
+    scale: 4.7, octaves: 7, relief: 0.85, cracks: 0.60, strata: 0.25,
+    moisture: 0.95, moss: 0.15, roughness: 0.35, brick: 0, veins: 0,
+    colors: ['#0d1418', '#20313a', '#3f565f', '#71888f'],
+    moss: '#284a2a',
+    vein: '#8fd8ff'
+  },
+  dungeonBricks: {
+    scale: 5.0, octaves: 6, relief: 0.55, cracks: 0.35, strata: 0.05,
+    moisture: 0.18, moss: 0.15, roughness: 0.78, brick: 0.95, veins: 0,
+    colors: ['#241f1b', '#4c4238', '#77685a', '#a59482'],
+    moss: '#4a6b34',
+    vein: '#c8b08a'
+  },
+  lavaVeins: {
+    scale: 5.5, octaves: 7, relief: 0.80, cracks: 0.85, strata: 0.18,
+    moisture: 0.00, moss: 0.00, roughness: 0.58, brick: 0, veins: 0.90,
+    colors: ['#090708', '#241d1c', '#4a3a35', '#7c655c'],
+    moss: '#3b2b20',
+    vein: '#ff5a1f'
+  },
+  crystalCave: {
+    scale: 5.0, octaves: 7, relief: 0.72, cracks: 0.55, strata: 0.12,
+    moisture: 0.35, moss: 0.05, roughness: 0.42, brick: 0, veins: 0.75,
+    colors: ['#12101d', '#27223b', '#4c4166', '#8b7fae'],
+    moss: '#334c44',
+    vein: '#74e6ff'
+  }
+};
+
+let palette = [];
+let mossRGB = [70, 105, 55];
+let veinRGB = [255, 90, 25];
+
+function hexToRgb(hex) {
+  hex = hex.replace('#', '');
+  if (hex.length === 3) {
+    hex = hex.split('').map(ch => ch + ch).join('');
+  }
+  return [
+    parseInt(hex.slice(0, 2), 16),
+    parseInt(hex.slice(2, 4), 16),
+    parseInt(hex.slice(4, 6), 16)
+  ];
+}
+
+const sliderIds = [
+  'scale', 'octaves', 'relief', 'cracks', 'strata',
+  'moisture', 'moss', 'roughness', 'brick', 'veins',
+  'normalStrength', 'aoStrength'
+];
+
+function updateLabels() {
+  for (const id of sliderIds) {
+    const el = $(id);
+    const span = $(id + 'Val');
+    if (el && span) {
+      span.textContent = (+el.value).toFixed(id === 'octaves' ? 0 : 2);
+    }
+  }
+}
+
+function applyPreset(key) {
+  const pr = PRESETS[key];
+  if (!pr) return;
+
+  $('scale').value = pr.scale;
+  $('octaves').value = pr.octaves;
+  $('relief').value = pr.relief;
+  $('cracks').value = pr.cracks;
+  $('strata').value = pr.strata;
+  $('moisture').value = pr.moisture;
+  $('moss').value = pr.moss;
+  $('roughness').value = pr.roughness;
+  $('brick').value = pr.brick;
+  $('veins').value = pr.veins;
+
+  palette = pr.colors.map(hexToRgb);
+  mossRGB = hexToRgb(pr.moss);
+  veinRGB = hexToRgb(pr.vein);
+
+  updateLabels();
+}
+
+function getParams() {
+  return {
+    size: parseInt($('size').value, 10),
+    seed: parseInt($('seed').value, 10) || 0,
+    scale: +$('scale').value,
+    octaves: Math.round(+$('octaves').value),
+    relief: +$('relief').value,
+    cracks: +$('cracks').value,
+    strata: +$('strata').value,
+    moisture: +$('moisture').value,
+    moss: +$('moss').value,
+    roughness: +$('roughness').value,
+    brick: +$('brick').value,
+    veins: +$('veins').value,
+    normalStrength: +$('normalStrength').value,
+    aoStrength: +$('aoStrength').value,
+    invertY: $('invertY').checked
+  };
+}
+
+function clamp01(x) {
+  return x < 0 ? 0 : x > 1 ? 1 : x;
+}
+
+function mix(a, b, t) {
+  return a + (b - a) * t;
+}
+
+function mod(n, m) {
+  return ((n % m) + m) % m;
+}
+
+function mod1(x) {
+  return x - Math.floor(x);
+}
+
+function smoothstep(a, b, x) {
+  if (b === a) return x < a ? 0 : 1;
+  let t = (x - a) / (b - a);
+  t = clamp01(t);
+  return t * t * (3 - 2 * t);
+}
+
+function hash2(x, y, seed) {
+  let h = Math.imul(x, 0x27d4eb2d) ^ Math.imul(y, 0x165667b1) ^ Math.imul(seed, 0x9e3779b9);
+  h = Math.imul(h ^ (h >>> 15), 0x85ebca6b);
+  h ^= h >>> 13;
+  h = Math.imul(h, 0xc2b2ae35);
+  h ^= h >>> 16;
+  return (h >>> 0) / 4294967296;
+}
+
+function valueNoise(x, y, period, seed) {
+  const xi = Math.floor(x);
+  const yi = Math.floor(y);
+  const xf = x - xi;
+  const yf = y - yi;
+
+  const sx = xf * xf * (3 - 2 * xf);
+  const sy = yf * yf * (3 - 2 * yf);
+
+  const x0 = mod(xi, period);
+  const x1 = mod(xi + 1, period);
+  const y0 = mod(yi, period);
+  const y1 = mod(yi + 1, period);
+
+  const v00 = hash2(x0, y0, seed);
+  const v10 = hash2(x1, y0, seed);
+  const v01 = hash2(x0, y1, seed);
+  const v11 = hash2(x1, y1, seed);
+
+  return mix(
+    mix(v00, v10, sx),
+    mix(v01, v11, sx),
+    sy
+  );
+}
+
+function fbm(u, v, cells, octaves, seed, ridged = false, persistence = 0.5, lacunarity = 2.0) {
+  u = mod1(u);
+  v = mod1(v);
+
+  let amp = 1;
+  let sum = 0;
+  let norm = 0;
+  let freq = 1;
+
+  for (let i = 0; i < octaves; i++) {
+    const period = Math.max(2, Math.round(cells * freq));
+    let n = valueNoise(u * period, v * period, period, seed + i * 131);
+
+    if (ridged) {
+      n = 1.0 - Math.abs(n * 2 - 1);
+      n = n * n;
+    }
+
+    sum += n * amp;
+    norm += amp;
+    amp *= persistence;
+    freq *= lacunarity;
+  }
+
+  return sum / (norm || 1);
+}
+
+function brickInfo(u, v, p, seed) {
+  const cols = Math.max(3, Math.round(p.scale));
+  const rows = cols * 2;
+
+  const row = Math.floor(v * rows);
+  const rowFrac = v * rows - row;
+  const offset = (row % 2) ? 0.5 / cols : 0;
+
+  const uu = mod1(u + offset);
+  const col = Math.floor(uu * cols);
+  const colFrac = uu * cols - col;
+
+  const id = hash2(col, row, seed + 777);
+
+  const edgeX = Math.min(colFrac, 1 - colFrac);
+  const edgeY = Math.min(rowFrac, 1 - rowFrac);
+  const edge = Math.min(edgeX, edgeY);
+
+  const mortarW = 0.055 + p.cracks * 0.035;
+  const inside = smoothstep(mortarW, mortarW + 0.04, edge);
+  const bevel = smoothstep(0.0, 0.18, edge);
+
+  const h = (0.16 + 0.62 * id) * (0.32 + 0.68 * inside) * (0.62 + 0.38 * bevel);
+
+  return { h, tint: id, inside };
+}
+
+function boxBlur(src, size, radius) {
+  if (radius <= 0) return src.slice();
+
+  const tmp = new Float32Array(src.length);
+  const dst = new Float32Array(src.length);
+  const div = radius * 2 + 1;
+
+  for (let y = 0; y < size; y++) {
+    const row = y * size;
+    let sum = 0;
+
+    for (let x = -radius; x <= radius; x++) {
+      sum += src[row + mod(x, size)];
+    }
+
+    for (let x = 0; x < size; x++) {
+      tmp[row + x] = sum / div;
+      const addX = mod(x + radius + 1, size);
+      const remX = mod(x - radius, size);
+      sum += src[row + addX] - src[row + remX];
+    }
+  }
+
+  for (let x = 0; x < size; x++) {
+    let sum = 0;
+
+    for (let y = -radius; y <= radius; y++) {
+      sum += tmp[mod(y, size) * size + x];
+    }
+
+    for (let y = 0; y < size; y++) {
+      dst[y * size + x] = sum / div;
+      const addY = mod(y + radius + 1, size);
+      const remY = mod(y - radius, size);
+      sum += tmp[addY * size + x] - tmp[remY * size + x];
+    }
+  }
+
+  return dst;
+}
+
+function setStatus(text) {
+  $('status').textContent = text;
+}
+
+const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+
+let currentGen = 0;
+
+async function generate() {
+  const myGen = ++currentGen;
+  const p = getParams();
+  const size = p.size;
+
+  for (const key in canvasMap) {
+    canvasMap[key].width = size;
+    canvasMap[key].height = size;
+  }
+
+  const N = size * size;
+  const height = new Float32Array(N);
+  const baseN = new Float32Array(N);
+  const patchN = new Float32Array(N);
+  const crackMask = new Float32Array(N);
+  const brickTint = p.brick > 0.001 ? new Float32Array(N) : null;
+  const brickMask = p.brick > 0.001 ? new Float32Array(N) : null;
+
+  setStatus('Генерация высот...');
+
+  for (let y = 0; y < size; y++) {
+    if (myGen !== currentGen) return;
+
+    const row = y * size;
+    const v = y / size;
+
+    for (let x = 0; x < size; x++) {
+      const i = row + x;
+      const u = x / size;
+
+      const n = fbm(u, v, p.scale, p.octaves, p.seed, false, 0.5, 2.0);
+      const rid = fbm(u, v, p.scale * 2.15, Math.max(3, p.octaves - 1), p.seed + 101, true, 0.55, 2.0);
+      const patch = fbm(u + 0.37, v + 0.71, p.scale * 3.35, 3, p.seed + 999, false, 0.5, 2.0);
+
+      let h = n;
+
+      h += (rid - 0.5) * 0.20 * p.relief;
+
+      if (p.strata > 0.001) {
+        const freq = Math.max(1, Math.round(p.scale * 1.35));
+        const s = 0.5 + 0.5 * Math.sin((v * freq + (n - 0.5) * 2.2) * Math.PI * 2);
+        h += (Math.pow(s, 1.8) - 0.5) * p.strata * 0.25;
+      }
+
+      const crackExp = 4.0 - p.cracks * 3.2;
+      let crack = Math.pow(clamp01(rid), crackExp) * p.cracks;
+      h -= crack * 0.35 * (0.3 + p.relief);
+
+      const pit = (1 - smoothstep(0.18, 0.44, n)) * 0.18 * p.relief;
+      h -= pit;
+
+      if (p.brick > 0.001) {
+        const du = (n - 0.5) * 0.02;
+        const dv = (patch - 0.5) * 0.02;
+        const bi = brickInfo(mod1(u + du), mod1(v + dv), p, p.seed);
+
+        let bh = clamp01(bi.h * 0.72 + n * 0.18 + patch * 0.10);
+        h = mix(h, bh, p.brick);
+
+        crack = Math.max(crack, (1 - bi.inside) * p.brick * 0.55);
+
+        if (brickTint) brickTint[i] = bi.tint;
+        if (brickMask) brickMask[i] = bi.inside;
+      }
+
+      crackMask[i] = clamp01(crack * 1.6);
+
+      h = clamp01(0.5 + (h - 0.5) * (0.6 + p.relief * 0.8));
+
+      height[i] = h;
+      baseN[i] = n;
+      patchN[i] = patch;
+    }
+
+    if ((y & 7) === 0) {
+      setStatus(`Генерация высот: ${Math.round(((y + 1) / size) * 100)}%`);
+      await tick();
+    }
+  }
+
+  if (myGen !== currentGen) return;
+
+  setStatus('AO и размытие...');
+  await tick();
+
+  const blurRadius = Math.max(1, Math.round(size / 256));
+  const blur = boxBlur(height, size, blurRadius);
+
+  if (myGen !== currentGen) return;
+
+  setStatus('Нормали и PBR-карты...');
+
+  const baseImg = ctxMap.base.createImageData(size, size);
+  const normalImg = ctxMap.normal.createImageData(size, size);
+  const roughImg = ctxMap.rough.createImageData(size, size);
+  const aoImg = ctxMap.ao.createImageData(size, size);
+  const heightImg = ctxMap.height.createImageData(size, size);
+
+  const bd = baseImg.data;
+  const nd = normalImg.data;
+  const rd = roughImg.data;
+  const ad = aoImg.data;
+  const hd = heightImg.data;
+
+  for (let y = 0; y < size; y++) {
+    if (myGen !== currentGen) return;
+
+    const row = y * size;
+    const yUp = (y > 0 ? y - 1 : size - 1) * size;
+    const yDown = (y < size - 1 ? y + 1 : 0) * size;
+
+    for (let x = 0; x < size; x++) {
+      const i = row + x;
+      const j = i * 4;
+
+      const xLeft = x > 0 ? x - 1 : size - 1;
+      const xRight = x < size - 1 ? x + 1 : 0;
+
+      const left = height[row + xLeft];
+      const right = height[row + xRight];
+      const up = height[yUp + x];
+      const down = height[yDown + x];
+
+      let nx = (left - right) * p.normalStrength;
+      let ny = (down - up) * p.normalStrength;
+
+      if (p.invertY) ny = -ny;
+
+      const nz = 1.0;
+      const invLen = 1 / Math.sqrt(nx * nx + ny * ny + nz * nz);
+
+      nx *= invLen;
+      ny *= invLen;
+      const nzz = nz * invLen;
+
+      nd[j] = (nx * 0.5 + 0.5) * 255;
+      nd[j + 1] = (ny * 0.5 + 0.5) * 255;
+      nd[j + 2] = (nzz * 0.5 + 0.5) * 255;
+      nd[j + 3] = 255;
+
+      const valley = clamp01((blur[i] - height[i]) * (2 + p.aoStrength * 10));
+      const ao = clamp01(1 - valley * 1.25 - crackMask[i] * 0.18);
+      const flat = nzz;
+
+      const wet = clamp01(
+        p.moisture *
+        (0.15 + valley * 1.2 + crackMask[i] * 0.45) *
+        (0.35 + patchN[i] * 0.65)
+      );
+
+      const moss = clamp01(
+        p.moss *
+        (0.20 + valley * 1.1 + patchN[i] * 0.55) *
+        (0.30 + flat * 0.70) *
+        (0.35 + baseN[i] * 0.65)
+      );
+
+      const veinRaw = p.veins * crackMask[i] * (0.40 + patchN[i] * 0.90);
+      const vein = smoothstep(0.12, 0.80, veinRaw);
+
+      let t = height[i] * 0.68 + baseN[i] * 0.32;
+
+      if (brickMask) {
+        t = mix(t, brickTint[i], p.brick * brickMask[i] * 0.82);
+      }
+
+      t = clamp01(t);
+
+      const palPos = t * (palette.length - 1);
+      let pi = Math.floor(palPos);
+      let pf = palPos - pi;
+
+      if (pi >= palette.length - 1) {
+        pi = palette.length - 1;
+        pf = 0;
+      }
+
+      const c0 = palette[pi];
+      const c1 = palette[Math.min(pi + 1, palette.length - 1)];
+
+      let rr = c0[0] + (c1[0] - c0[0]) * pf;
+      let gg = c0[1] + (c1[1] - c0[1]) * pf;
+      let bb = c0[2] + (c1[2] - c0[2]) * pf;
+
+      const speck = (patchN[i] - 0.5) * 18;
+      rr += speck;
+      gg += speck;
+      bb += speck;
+
+      const shade = 0.35 + 0.65 * ao;
+      rr *= shade;
+      gg *= shade;
+      bb *= shade;
+
+      if (wet > 0) {
+        const dark = 1 - wet * 0.52;
+        rr *= dark;
+        gg *= dark;
+        bb *= dark;
+        bb += wet * 12;
+      }
+
+      if (moss > 0) {
+        rr = mix(rr, mossRGB[0], moss);
+        gg = mix(gg, mossRGB[1], moss);
+        bb = mix(bb, mossRGB[2], moss);
+      }
+
+      if (vein > 0) {
+        rr = mix(rr, veinRGB[0], vein);
+        gg = mix(gg, veinRGB[1], vein);
+        bb = mix(bb, veinRGB[2], vein);
+      }
+
+      bd[j] = rr;
+      bd[j + 1] = gg;
+      bd[j + 2] = bb;
+      bd[j + 3] = 255;
+
+      let rough = p.roughness + (baseN[i] - 0.5) * 0.25 + (height[i] - 0.5) * 0.15;
+
+      if (brickMask) {
+        rough = mix(rough, 0.86, (1 - brickMask[i]) * p.brick);
+      }
+
+      rough = mix(rough, 0.95, moss);
+      rough = mix(rough, 0.08, wet * 0.90);
+      rough = mix(rough, 0.22, vein);
+      rough = clamp01(rough);
+
+      const rv = rough * 255;
+      rd[j] = rv;
+      rd[j + 1] = rv;
+      rd[j + 2] = rv;
+      rd[j + 3] = 255;
+
+      const av = ao * 255;
+      ad[j] = av;
+      ad[j + 1] = av;
+      ad[j + 2] = av;
+      ad[j + 3] = 255;
+
+      const hv = height[i] * 255;
+      hd[j] = hv;
+      hd[j + 1] = hv;
+      hd[j + 2] = hv;
+      hd[j + 3] = 255;
+    }
+
+    if ((y & 7) === 0) {
+      setStatus(`Нормали и PBR: ${Math.round(((y + 1) / size) * 100)}%`);
+      await tick();
+    }
+  }
+
+  if (myGen !== currentGen) return;
+
+  ctxMap.base.putImageData(baseImg, 0, 0);
+  ctxMap.normal.putImageData(normalImg, 0, 0);
+  ctxMap.rough.putImageData(roughImg, 0, 0);
+  ctxMap.ao.putImageData(aoImg, 0, 0);
+  ctxMap.height.putImageData(heightImg, 0, 0);
+
+  setStatus('Готово. Можно скачивать и тащить в данж~');
+}
+
+function downloadCanvas(canvas, filename) {
+  canvas.toBlob((blob) => {
+    if (!blob) return;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }, 'image/png');
+}
+
+$('generate').addEventListener('click', generate);
+
+$('randomSeed').addEventListener('click', () => {
+  $('seed').value = Math.floor(Math.random() * 999999);
+  generate();
+});
+
+$('preset').addEventListener('change', () => {
+  applyPreset($('preset').value);
+  generate();
+});
+
+$('download').addEventListener('click', () => {
+  downloadCanvas(canvasMap.base, 'Rock_BaseColor.png');
+  downloadCanvas(canvasMap.normal, 'Rock_Normal.png');
+  downloadCanvas(canvasMap.rough, 'Rock_Roughness.png');
+  downloadCanvas(canvasMap.ao, 'Rock_AO.png');
+  downloadCanvas(canvasMap.height, 'Rock_Height.png');
+});
+
+document.querySelectorAll('input, select').forEach(el => {
+  el.addEventListener('input', updateLabels);
+});
+
+applyPreset($('preset').value);
+updateLabels();
+generate();
+</script>
+</body>
+</html>
