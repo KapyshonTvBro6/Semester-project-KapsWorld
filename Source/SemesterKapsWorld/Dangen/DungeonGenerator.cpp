@@ -128,6 +128,7 @@ void ADungeonGenerator::GenerateInternal()
 	// --- шаг 1: сетка из нулей ---
 	Grid.SetNumZeroed(GridW * GridH);
 	RoomMap.Init(-1, GridW * GridH);
+	RoadMask.Init(0, GridW * GridH);   // пустая карта коридоров: заполняет CarveRoad
 	Rooms.Empty();
 
 	// Если Templates пуст (актор сохранён до появления дефолтов) — берём встроенный
@@ -345,6 +346,7 @@ void ADungeonGenerator::CarveRoom(const FRoomSpot& Spot, const FRoomTemplate& Tp
 	Room.Index = Rooms.Num();
 	Room.Kind = Kind;
 	Room.Color = Tpl.Color;
+	Room.Shape = Tpl.Shape;   // нужно BuildGeometry(): по форме видно, что скруглять дугой
 
 	// комната = 1 на сетке
 	for (const FIntPoint& C : ShapeCells(Spot.W, Spot.H, Tpl.Shape))
@@ -597,7 +599,9 @@ void ADungeonGenerator::CarveRoad(int32 X1, int32 Y1, int32 X2, int32 Y2, int32 
 			{
 				const int32 X = Seg.bAlongX ? A : Seg.Fixed + k;
 				const int32 Y = Seg.bAlongX ? Seg.Fixed + k : A;
-				if (InBounds(X, Y)) Grid[Idx(X, Y)] = 1; // дороги не ломают комнаты — 1 остаётся 1
+				if (!InBounds(X, Y)) continue;
+				Grid[Idx(X, Y)] = 1;   // дороги не ломают комнаты — 1 остаётся 1
+				if (RoadMask.Num() == GridW * GridH) RoadMask[Idx(X, Y)] = 1;   // нужно скруглению круглых комнат
 			}
 		}
 	}
@@ -797,6 +801,7 @@ void ADungeonGenerator::ClearGenerated()
 
 	Grid.Reset();
 	RoomMap.Reset();
+	RoadMask.Reset();
 	Rooms.Reset();
 }
 
@@ -806,6 +811,310 @@ void ADungeonGenerator::ResetRoomTemplates()
 {
 	Templates = MakeDefaultTemplates();
 }
+
+// =====================================================================
+//  СКРУГЛЕНИЕ КОМНАТ ФОРМЫ «КРУГЛАЯ»
+//
+//  Стена такой комнаты собирается не лесенкой по клеткам, а ломаной из
+//  хорд окружности, вписанной в прямоугольник комнаты: дуга касается
+//  прямых стен ровно там же, где окружность касается сторон прямоугольника
+//  (как в макете: грань через каждые 22.5° при 16 гранях на круг).
+//
+//  Старые грани-лесенки при этом НЕ удаляются: они надёжно держат дороги,
+//  двери и навигацию. Дуга строится внутри уже вырезанных клеток комнаты,
+//  а всё, что осталось между дугой и прежней стеной, накрывается крышкой
+//  крыши — снаружи контур комнаты выглядит ровно по дуге, без уголков.
+//
+//  Масштаб дуги подбирается автоматически: он чуть меньше единицы, чтобы
+//  вся дуга прошла внутри клеток комнаты с запасом RoundArcMargin. Без
+//  этого дуга местами вылезала бы за угол клетки и вставала бы впритык к
+//  прежней стене — тогда рядом были бы видны и гладкая дуга, и ступеньки.
+//
+//  Там, где к клетке комнаты примыкает дорога или чужая комната (вход),
+//  дуга разрывается: проход должен остаться открытым.
+// =====================================================================
+
+// Запас от вершины дуги до границы открытой клетки, в долях клетки.
+static const float RoundArcMargin = 0.18f;
+
+static float WrapAngle2Pi(float Angle)
+{
+	const float Two = 2.f * UE_PI;
+	Angle = FMath::Fmod(Angle, Two);
+	if (Angle < 0.f) Angle += Two;
+	return Angle;
+}
+
+int32 ADungeonGenerator::RoundArcSampleCount(const FPlacedRoom& Room) const
+{
+	const int32 Base = FMath::Clamp(WallArcSegments, 8, 128);
+	// Большой комнате нужно больше граней, иначе одна грань растягивается на
+	// пару метров и круг снова выглядит гранёным.
+	const int32 Bigger = FMath::Max(1, FMath::Max(Room.W, Room.H) / 8);
+	return Base * Bigger;
+}
+
+// Клетка сетки открыта и принадлежит именно этой комнате.
+bool ADungeonGenerator::RoomCellOwned(int32 X, int32 Y, int32 RoomIndex) const
+{
+	if (!InBounds(X, Y)) return false;
+	const int32 I = Idx(X, Y);
+	if (Grid[I] == 0) return false;
+	return RoomMap[I] == RoomIndex;
+}
+
+// Клетка принадлежит комнате и при этом не занята коридором.
+bool ADungeonGenerator::RoomCellFree(int32 X, int32 Y, int32 RoomIndex) const
+{
+	if (!RoomCellOwned(X, Y, RoomIndex)) return false;
+	return RoadMask.Num() != GridW * GridH || RoadMask[Idx(X, Y)] == 0;
+}
+
+// Точка дуги (в клетках) стоит внутри клетки комнаты и не ближе Margin к её краю.
+bool ADungeonGenerator::ArcPointFitsRoom(float GX, float GY, const FPlacedRoom& Room, float Margin) const
+{
+	const int32 CX = FMath::FloorToInt(GX);
+	const int32 CY = FMath::FloorToInt(GY);
+	if (!RoomCellOwned(CX, CY, Room.Index)) return false;
+
+	const float FX = GX - static_cast<float>(CX);
+	const float FY = GY - static_cast<float>(CY);
+	// у границы клетки, за которой чужая клетка, дуга не подходит вплотную
+	if (FX < Margin && !RoomCellOwned(CX - 1, CY, Room.Index)) return false;
+	if (FX > 1.f - Margin && !RoomCellOwned(CX + 1, CY, Room.Index)) return false;
+	if (FY < Margin && !RoomCellOwned(CX, CY - 1, Room.Index)) return false;
+	if (FY > 1.f - Margin && !RoomCellOwned(CX, CY + 1, Room.Index)) return false;
+	return true;
+}
+
+// Нельзя строить грань, если её хорда пересекает клетку коридора: гладкая стена
+// встала бы поперёк прохода и разрезала подземелье. Такое возможно, когда коридор
+// идёт сквозь комнату (дороги не ломают клетки комнат, поэтому клетки такого
+// коридора по-прежнему принадлежат комнате).
+bool ADungeonGenerator::ArcFaceCrossesRoad(float AX, float AY, float BX, float BY) const
+{
+	if (RoadMask.Num() != GridW * GridH) return false;
+
+	const float DX = BX - AX;
+	const float DY = BY - AY;
+	const float Len = FMath::Sqrt(DX * DX + DY * DY);
+	const int32 Steps = FMath::Max(1, FMath::CeilToInt(Len * 2.f));   // шаг ~0.5 клетки
+
+	for (int32 s = 0; s <= Steps; ++s)
+	{
+		const float T = static_cast<float>(s) / static_cast<float>(Steps);
+		const int32 CX = FMath::FloorToInt(AX + DX * T);
+		const int32 CY = FMath::FloorToInt(AY + DY * T);
+		if (!InBounds(CX, CY)) continue;
+		if (RoadMask[Idx(CX, CY)] != 0) return true;
+	}
+	return false;
+}
+
+// Угловые окна, в которых дугу надо разрывать: там клетка комнаты соседствует
+// с открытой чужой клеткой (дорога или другая комната) — это вход в комнату.
+// Окна заданы в параметрическом угле эллипса: при равномерном уменьшении
+// дуги (одинаковый масштаб по обеим полуосям) эти углы не меняются.
+void ADungeonGenerator::CollectDoorWindows(const FPlacedRoom& Room, const FVector2D& Center, const FVector2D& Semi,
+                                           TArray<TPair<float, float>>& Out) const
+{
+	Out.Reset();
+
+	const float Two = 2.f * UE_PI;
+	const float Step = Two / static_cast<float>(FMath::Max(8, RoundArcSampleCount(Room)));
+	const float Pad  = Step * 0.5f + 0.01f;   // немного расширить окно, чтобы грань не легла на вход
+
+	auto ParamAngle = [&](float GX, float GY)
+	{
+		return FMath::Atan2((GY - Center.Y) / Semi.Y, (GX - Center.X) / Semi.X);
+	};
+
+	const FIntPoint Neighbours[4] = { FIntPoint(1, 0), FIntPoint(-1, 0), FIntPoint(0, 1), FIntPoint(0, -1) };
+
+	for (int32 Y = Room.Y; Y < Room.Y + Room.H; ++Y)
+	{
+		for (int32 X = Room.X; X < Room.X + Room.W; ++X)
+		{
+			if (!RoomCellOwned(X, Y, Room.Index)) continue;
+
+			for (const FIntPoint& D : Neighbours)
+			{
+				const int32 NX = X + D.X;
+				const int32 NY = Y + D.Y;
+				if (!InBounds(NX, NY)) continue;
+
+				const int32 I = Idx(NX, NY);
+				if (Grid[I] == 0) continue;              // сосед — камень, прохода тут нет
+				if (RoomMap[I] == Room.Index) continue;  // сосед — своя клетка комнаты
+
+				// концы общего ребра двух клеток
+				float A0, A1;
+				if (D.X != 0)
+				{
+					const float EX = (D.X > 0) ? static_cast<float>(X + 1) : static_cast<float>(X);
+					A0 = ParamAngle(EX, static_cast<float>(Y));
+					A1 = ParamAngle(EX, static_cast<float>(Y + 1));
+				}
+				else
+				{
+					const float EY = (D.Y > 0) ? static_cast<float>(Y + 1) : static_cast<float>(Y);
+					A0 = ParamAngle(static_cast<float>(X), EY);
+					A1 = ParamAngle(static_cast<float>(X + 1), EY);
+				}
+
+				// приводим окно к [0, 2π), расширяем на Pad и, если оно переходит
+				// через ноль, режем на две части
+				float Delta = A1 - A0;
+				while (Delta >  UE_PI) Delta -= Two;
+				while (Delta < -UE_PI) Delta += Two;
+
+				const float Mid  = WrapAngle2Pi(A0 + Delta * 0.5f);
+				const float Half = FMath::Abs(Delta) * 0.5f + Pad;
+				const float Lo   = Mid - Half;
+				const float Hi   = Mid + Half;
+
+				if (Lo < 0.f)
+				{
+					Out.Add(TPair<float, float>(Lo + Two, Two));
+					Out.Add(TPair<float, float>(0.f, WrapAngle2Pi(Hi)));
+				}
+				else if (Hi >= Two)
+				{
+					Out.Add(TPair<float, float>(Lo, Two));
+					Out.Add(TPair<float, float>(0.f, WrapAngle2Pi(Hi - Two)));
+				}
+				else
+				{
+					Out.Add(TPair<float, float>(Lo, Hi));
+				}
+			}
+		}
+	}
+}
+
+bool ADungeonGenerator::AngleInWindows(float Angle, const TArray<TPair<float, float>>& Windows) const
+{
+	const float A = WrapAngle2Pi(Angle);
+	for (const TPair<float, float>& W : Windows)
+	{
+		if (A >= W.Key && A <= W.Value) return true;
+	}
+	return false;
+}
+
+// наибольший масштаб дуги (1 = ровно вписанная окружность), при котором вся
+// дуга, не считая дверных окон, проходит внутри клеток комнаты с запасом.
+// 0 = подобрать не удалось: комната слишком «квадратная», скругляем её прежними гранями.
+float ADungeonGenerator::RoundArcScale(const FPlacedRoom& Room, const FVector2D& Center, const FVector2D& Semi,
+                                       int32 Samples, const TArray<TPair<float, float>>& Windows) const
+{
+	const float Two = 2.f * UE_PI;
+	const int32 March = 4;   // сколько точек проверяем между соседними вершинами дуги
+
+	for (int32 i = 0; i < 24; ++i)
+	{
+		const float S = 1.f - 0.03f * static_cast<float>(i);
+		if (S < 0.45f) return 0.f;
+
+		bool bFits = true;
+		for (int32 k = 0; k < Samples && bFits; ++k)
+		{
+			const float A0 = Two * static_cast<float>(k) / static_cast<float>(Samples);
+			const float A1 = Two * static_cast<float>(k + 1) / static_cast<float>(Samples);
+
+			for (int32 m = 0; m < March; ++m)
+			{
+				const float A = A0 + (A1 - A0) * (static_cast<float>(m) / static_cast<float>(March));
+				if (AngleInWindows(A, Windows)) continue;   // тут дугу разрывает вход
+
+				const float GX = Center.X + Semi.X * S * FMath::Cos(A);
+				const float GY = Center.Y + Semi.Y * S * FMath::Sin(A);
+				if (!ArcPointFitsRoom(GX, GY, Room, RoundArcMargin)) { bFits = false; break; }
+			}
+		}
+
+		if (bFits) return S;
+	}
+
+	return 0.f;
+}
+
+void ADungeonGenerator::BuildRoundRooms(TArray<FRoundRoom>& Out) const
+{
+	Out.Reset();
+	if (!bRoundCircleWalls) return;
+	if (Grid.Num() != GridW * GridH || RoomMap.Num() != GridW * GridH) return;
+
+	const float Two = 2.f * UE_PI;
+
+	for (const FPlacedRoom& Room : Rooms)
+	{
+		if (Room.Shape != ERoomShape::Circle) continue;
+		if (Room.W < 4 || Room.H < 4) continue;   // на 3 клетках скруглять нечего
+
+		FRoundRoom R;
+		R.RoomIndex = Room.Index;
+		R.Center    = FVector2D(static_cast<float>(Room.X) + Room.W * 0.5f,
+		                        static_cast<float>(Room.Y) + Room.H * 0.5f);
+		R.Semi      = FVector2D(Room.W * 0.5f, Room.H * 0.5f);
+		R.Samples   = FMath::Max(8, RoundArcSampleCount(Room));
+
+		TArray<TPair<float, float>> Windows;
+		CollectDoorWindows(Room, R.Center, R.Semi, Windows);
+
+		const float S = RoundArcScale(Room, R.Center, R.Semi, R.Samples, Windows);
+		if (S <= 0.f) continue;
+		R.Semi *= S;
+
+		// вершины дуги по кругу и отметки разрывов (входы в комнату)
+		R.Pts.Init(FVector2D::ZeroVector, R.Samples);
+		R.Blocked.Init(0, R.Samples);
+		for (int32 k = 0; k < R.Samples; ++k)
+		{
+			const float A  = Two * static_cast<float>(k) / static_cast<float>(R.Samples);
+			const float GX = R.Center.X + R.Semi.X * FMath::Cos(A);
+			const float GY = R.Center.Y + R.Semi.Y * FMath::Sin(A);
+			R.Pts[k] = FVector2D(GX, GY);
+
+			if (AngleInWindows(A, Windows))
+			{
+				R.Blocked[k] = 1;
+				continue;
+			}
+			if (!RoomCellOwned(FMath::FloorToInt(GX), FMath::FloorToInt(GY), Room.Index))
+				R.Blocked[k] = 1;
+		}
+
+		int32 Open = 0;
+		for (uint8 b : R.Blocked) if (!b) ++Open;
+		if (Open < 2) continue;   // почти весь круг под входами — обычная стена лучше
+
+		// Клетки-уголки: клетка комнаты целиком в дугу не помещается -> то, что
+		// осталось за дугой, надо накрыть крышкой.
+		for (int32 Y = Room.Y; Y < Room.Y + Room.H; ++Y)
+		{
+			for (int32 X = Room.X; X < Room.X + Room.W; ++X)
+			{
+				if (!RoomCellFree(X, Y, Room.Index)) continue;   // по клетке идёт коридор — крышу тут не ставим
+
+				bool bWholeInside = true;
+				for (int32 i = 0; i < 4 && bWholeInside; ++i)
+				{
+					const float CornerX = static_cast<float>(X) + ((i & 1) ? 1.f : 0.f);
+					const float CornerY = static_cast<float>(Y) + ((i & 2) ? 1.f : 0.f);
+					const float NX = (CornerX - R.Center.X) / R.Semi.X;
+					const float NY = (CornerY - R.Center.Y) / R.Semi.Y;
+					if (NX * NX + NY * NY > 1.f) bWholeInside = false;
+				}
+
+				if (!bWholeInside) R.CapCells.Add(FIntPoint(X, Y));
+			}
+		}
+
+		Out.Add(MoveTemp(R));
+	}
+}
+
 
 // =====================================================================
 //  Геометрия: 0 -> стены (одна секция процедурного меша) + крыша (отдельная секция),
@@ -822,6 +1131,11 @@ void ADungeonGenerator::BuildGeometry()
 
 	WallsMesh->ClearAllMeshSections();
 	if (RoofMesh) RoofMesh->ClearAllMeshSections();
+
+	// Дуги стен комнат формы «Круглая»: считаем один раз, они нужны и стенам,
+	// и крышке уголков пола, оставшихся за дугой.
+	TArray<FRoundRoom> RoundRooms;
+	BuildRoundRooms(RoundRooms);
 
 	const float CS = CellSize;
 	const float WH = WallHeight;
@@ -910,14 +1224,9 @@ void ADungeonGenerator::BuildGeometry()
 	// то есть плита смотрит ВВЕРХ (как и прежние крышки клеток).
 	// UV = мировые X/Y в сантиметрах: швы плиток стоят в одних и тех же местах
 	// сетки на всех прямоугольниках, поэтому тайлинг непрерывен через швы.
-	auto AddFlatRect = [&](TArray<FVector>& Verts, TArray<int32>& Tris, TArray<FVector>& Norms,
-		                   TArray<FVector2D>& UVS, const FIntRect& Rect, float Height, int32& CoveredCells)
+	auto AddFlatQuadCM = [&](TArray<FVector>& Verts, TArray<int32>& Tris, TArray<FVector>& Norms,
+		                     TArray<FVector2D>& UVS, float X0, float Y0, float X1, float Y1, float Height)
 	{
-		const float X0 = static_cast<float>(Rect.Min.X) * CS;
-		const float Y0 = static_cast<float>(Rect.Min.Y) * CS;
-		const float X1 = static_cast<float>(Rect.Max.X + 1) * CS;
-		const float Y1 = static_cast<float>(Rect.Max.Y + 1) * CS;
-
 		const int32 BaseIdx = Verts.Num();
 
 		Verts.Add(CellLocal(X0, Y0, Height));   // P00
@@ -939,6 +1248,19 @@ void ADungeonGenerator::BuildGeometry()
 		UVS.Add(FVector2D(UV(X0), UV(Y1)));
 		UVS.Add(FVector2D(UV(X1), UV(Y1)));
 		UVS.Add(FVector2D(UV(X1), UV(Y0)));
+	};
+
+	// Та же плита по прямоугольнику клеток (Max включительно). Обёртка держит
+	// крышу и пол на клеточной сетке, а крышку уголков дуги — на её собственной,
+	// более мелкой: оба пользуются одной раскладкой UV, поэтому швы плиток
+	// совпадают на всех поверхностях.
+	auto AddFlatRect = [&](TArray<FVector>& Verts, TArray<int32>& Tris, TArray<FVector>& Norms,
+		                   TArray<FVector2D>& UVS, const FIntRect& Rect, float Height, int32& CoveredCells)
+	{
+		AddFlatQuadCM(Verts, Tris, Norms, UVS,
+		              static_cast<float>(Rect.Min.X) * CS, static_cast<float>(Rect.Min.Y) * CS,
+		              static_cast<float>(Rect.Max.X + 1) * CS, static_cast<float>(Rect.Max.Y + 1) * CS,
+		              Height);
 
 		CoveredCells += (Rect.Max.X - Rect.Min.X + 1) * (Rect.Max.Y - Rect.Min.Y + 1);
 	};
@@ -1020,6 +1342,50 @@ void ADungeonGenerator::BuildGeometry()
 		UVs.Add(FVector2D(URight, UV(WH)));
 	};
 
+	// Одна грань гладкой дуги: низ P0-P1, верх на той же высоте WH, что и у всех
+	// стен. Нормали ВЕРШИН радиальные (смотрят к центру комнаты), поэтому ломаная
+	// из хорд под светом выглядит как гладкая стена, а не как набор пластин.
+	// A и B — точки дуги в сантиметрах (уже относительно актора, как и все координаты).
+	auto AddArcQuad = [&](const FVector2D& A, const FVector2D& B, const FVector& FaceNormal,
+	                      const FVector2D& CenterCM, float ULeft, float URight)
+	{
+		const FVector BottomLeft  = CellLocal(A.X, A.Y, 0.f);
+		const FVector BottomRight = CellLocal(B.X, B.Y, 0.f);
+		const FVector TopLeft     = BottomLeft  + FVector(0.f, 0.f, WH);
+		const FVector TopRight    = BottomRight + FVector(0.f, 0.f, WH);
+
+		const int32 BaseIdx = Vertices.Num();
+
+		Vertices.Add(BottomLeft);
+		Vertices.Add(BottomRight);
+		Vertices.Add(TopLeft);
+		Vertices.Add(TopRight);
+
+		Triangles.Add(BaseIdx + 0);
+		Triangles.Add(BaseIdx + 1);
+		Triangles.Add(BaseIdx + 2);
+
+		Triangles.Add(BaseIdx + 1);
+		Triangles.Add(BaseIdx + 3);
+		Triangles.Add(BaseIdx + 2);
+
+		auto RadialNormal = [&](const FVector2D& P)
+		{
+			FVector N(CenterCM.X - P.X, CenterCM.Y - P.Y, 0.f);
+			return N.SizeSquared() > KINDA_SMALL_NUMBER ? N.GetSafeNormal() : FaceNormal;
+		};
+
+		Normals.Add(RadialNormal(A));
+		Normals.Add(RadialNormal(B));
+		Normals.Add(RadialNormal(A));
+		Normals.Add(RadialNormal(B));
+
+		UVs.Add(FVector2D(ULeft,  0.f));
+		UVs.Add(FVector2D(URight, 0.f));
+		UVs.Add(FVector2D(ULeft,  UV(WH)));
+		UVs.Add(FVector2D(URight, UV(WH)));
+	};
+
 	int32 WallRects = 0;      // сколько прямоугольников построили
 	int32 WallCellFaces = 0;  // сколько отдельных квадратов было бы по-старому
 
@@ -1085,6 +1451,61 @@ void ADungeonGenerator::BuildGeometry()
 		}
 	}
 
+	// ---------------------------------------------------------------------
+	//  ГЛАДКИЕ ДУГИ: стены комнат формы «Круглая».
+	//  Обход вершин дуги по кругу; там, где дуга разрывается (вход в комнату),
+	// граней нет — проход остаётся открытым, а счётчик длины плитки начинается
+	// заново, чтобы текстура на круглой стене была того же размера, что везде.
+	// ---------------------------------------------------------------------
+	int32 ArcFaces = 0;
+	for (const FRoundRoom& R : RoundRooms)
+	{
+		const FVector2D CenterCM(R.Center.X * CS, R.Center.Y * CS);
+		float ArcLen = 0.f;
+
+		for (int32 k = 0; k < R.Samples; ++k)
+		{
+			const int32 Next = (k + 1) % R.Samples;
+			if (R.Blocked[k] || R.Blocked[Next])
+			{
+				ArcLen = 0.f;
+				continue;
+			}
+
+			FVector2D A = R.Pts[k];
+			FVector2D B = R.Pts[Next];
+
+			// ориентацию подбираем так, чтобы передняя грань смотрела ВНУТРЬ комнаты
+			// (тот же порядок обхода, что у прямоугольных граней: L = Normal x Up)
+			FVector L(B.X - A.X, B.Y - A.Y, 0.f);
+			FVector FaceNormal = FVector::CrossProduct(FVector(0, 0, 1), L);
+			const FVector2D Mid((A.X + B.X) * 0.5f, (A.Y + B.Y) * 0.5f);
+
+			// Грань не ставим, если её хорда пересекает коридор: иначе подземелье
+			// оказалось бы разрезано стеной.
+			if (ArcFaceCrossesRoad(A.X, A.Y, B.X, B.Y))
+			{
+				ArcLen = 0.f;
+				continue;
+			}
+
+			const FVector Inward(R.Center.X - Mid.X, R.Center.Y - Mid.Y, 0.f);
+			if (FVector::DotProduct(FaceNormal, Inward) < 0.f)
+			{
+				Swap(A, B);
+				FaceNormal = -FaceNormal;
+			}
+
+			const float SegCM = (B - A).Size() * CS;
+			const float ULeft  = UV(ArcLen);
+			ArcLen += SegCM;
+			const float URight = UV(ArcLen);
+
+			AddArcQuad(A * CS, B * CS, FaceNormal, CenterCM, ULeft, URight);
+			++ArcFaces;
+		}
+	}
+
 	// одна секция на все стены; последним параметром включаем постройку коллизии
 	if (Vertices.Num() > 0)
 	{
@@ -1119,6 +1540,98 @@ void ADungeonGenerator::BuildGeometry()
 		for (const FIntRect& R : Rects)
 			AddFlatRect(RoofVerts, RoofTris, RoofNormals, RoofUVs, R, WH, RoofCells);
 
+		// -----------------------------------------------------------------
+		//  КРЫШКА уголков за дугой.
+		//  Дуга стоит ВНУТРИ вырезанных клеток (иначе она местами вылезала бы за
+		//  угол клетки и вставала бы впритык к прежней стене), поэтому между дугой
+		//  и прежней стеной клетки остаются уголки пола. Если их не накрыть, сверху
+		//  вокруг круглой стены была бы видна лесенка плитки. Дробим такие клетки на
+		//  доли и накрываем только те, что остались ЗА дугой: край крышки идёт почти
+		//  по самой дуге, а не ступеньками по клеткам, и снаружи видно ровный круг.
+		//  Плиты крышки и крышки камня не перекрываются: крышка занимает только
+		//  открытые клетки этой комнаты, камень крышью уже накрыт.
+		// -----------------------------------------------------------------
+		int32 CapQuads = 0;
+		if (bCapRoundCorners)
+		{
+			const int32 Sub = 8;   // долей клетки на сторону
+
+			for (const FRoundRoom& R : RoundRooms)
+			{
+				if (R.CapCells.Num() == 0) continue;
+				if (!Rooms.IsValidIndex(R.RoomIndex)) continue;
+				const FPlacedRoom& Room = Rooms[R.RoomIndex];
+
+				const int32 SW = Room.W * Sub;
+				const int32 SH = Room.H * Sub;
+				const float  S = static_cast<float>(Sub);
+
+				TArray<uint8> Need;
+				Need.Init(0, SW * SH);
+
+				for (const FIntPoint& C : R.CapCells)
+				{
+					const int32 BX = (C.X - Room.X) * Sub;
+					const int32 BY = (C.Y - Room.Y) * Sub;
+
+					for (int32 sy = 0; sy < Sub; ++sy)
+					{
+						for (int32 sx = 0; sx < Sub; ++sx)
+						{
+							const float PX = static_cast<float>(C.X) + (static_cast<float>(sx) + 0.5f) / S;
+							const float PY = static_cast<float>(C.Y) + (static_cast<float>(sy) + 0.5f) / S;
+							const float NX = (PX - R.Center.X) / R.Semi.X;
+							const float NY = (PY - R.Center.Y) / R.Semi.Y;
+							if (NX * NX + NY * NY > 1.f)
+								Need[(BY + sy) * SW + (BX + sx)] = 1;
+						}
+					}
+				}
+
+				// соседние доли объединяем в одну плиту (тот же жадный порядок, что у CollectRects)
+				TArray<uint8> Used;
+				Used.Init(0, SW * SH);
+
+				for (int32 Y = 0; Y < SH; ++Y)
+				{
+					for (int32 X = 0; X < SW; ++X)
+					{
+						const int32 I = Y * SW + X;
+						if (!Need[I] || Used[I]) continue;
+
+						int32 RectW = 1;
+						while (X + RectW < SW && Need[Y * SW + X + RectW] && !Used[Y * SW + X + RectW])
+							++RectW;
+
+						int32 RectH = 1;
+						while (Y + RectH < SH)
+						{
+							bool bWholeRow = true;
+							for (int32 i = 0; i < RectW; ++i)
+							{
+								const int32 J = (Y + RectH) * SW + X + i;
+								if (!Need[J] || Used[J]) { bWholeRow = false; break; }
+							}
+							if (!bWholeRow) break;
+							++RectH;
+						}
+
+						for (int32 YY = Y; YY < Y + RectH; ++YY)
+							for (int32 XX = X; XX < X + RectW; ++XX)
+								Used[YY * SW + XX] = 1;
+
+						AddFlatQuadCM(RoofVerts, RoofTris, RoofNormals, RoofUVs,
+						              static_cast<float>(Room.X * Sub + X) * CS / S,
+						              static_cast<float>(Room.Y * Sub + Y) * CS / S,
+						              static_cast<float>(Room.X * Sub + X + RectW) * CS / S,
+						              static_cast<float>(Room.Y * Sub + Y + RectH) * CS / S,
+						              WH);
+						++CapQuads;
+					}
+				}
+			}
+		}
+
 		if (RoofVerts.Num() > 0)
 		{
 			RoofMesh->CreateMeshSection(0, RoofVerts, RoofTris, RoofNormals, RoofUVs,
@@ -1128,6 +1641,10 @@ void ADungeonGenerator::BuildGeometry()
 
 		UE_LOG(LogTemp, Log, TEXT("Dungeon roof: %d плит накрыли %d клеток (по-старому было бы %d квадратов), %d vertices, %d triangles"),
 		       Rects.Num(), RoofCells, RoofCells, RoofVerts.Num(), RoofTris.Num() / 3);
+
+		if (ArcFaces > 0)
+			UE_LOG(LogTemp, Log, TEXT("Dungeon round walls: круглых комнат %d, граней дуги %d, плит крышки уголков %d"),
+			       RoundRooms.Num(), ArcFaces, CapQuads);
 	}
 
 	// Пол: плоские плиты над клетками 1 (комнаты и дороги) на высоте 0 — те же

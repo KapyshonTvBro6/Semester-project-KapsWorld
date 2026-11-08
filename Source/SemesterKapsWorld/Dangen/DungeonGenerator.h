@@ -146,6 +146,9 @@ struct FPlacedRoom
 	UPROPERTY(BlueprintReadOnly) int32 Index = -1;
 	UPROPERTY(BlueprintReadOnly) ERoomKind Kind = ERoomKind::Normal;
 	UPROPERTY(BlueprintReadOnly) FLinearColor Color = FLinearColor::White;
+	// Форма этого типа комнат: нужна BuildGeometry(), чтобы понять, какую комнату
+	// скруглять дугой (Shape = Circle), а какие оставить прежними гранями клеток.
+	UPROPERTY(BlueprintReadOnly) ERoomShape Shape = ERoomShape::Rect;
 };
 
 UCLASS()
@@ -199,6 +202,13 @@ public:
 
 	UPROPERTY(BlueprintReadOnly, Category = "Dungeon")
 	TArray<int32> RoomMap;       // индекс комнаты в клетке (-1 = нет)
+
+	// Дороги не ломают клетки комнат, поэтому клетка коридора внутри комнаты по
+	// RoomMap всё ещё принадлежит комнате. Отдельная карта дорог нужна скруглению
+	// круглых комнат: ни гладкая стена, ни крышка уголков не должны вставать
+	// поперёк коридора — иначе подземелье окажется разрезано пополам.
+	UPROPERTY(BlueprintReadOnly, Category = "Dungeon")
+	TArray<uint8> RoadMask;      // 1 = клетка затронута коридором
 
 	UPROPERTY(BlueprintReadOnly, Category = "Dungeon")
 	TArray<FPlacedRoom> Rooms;
@@ -318,6 +328,30 @@ public:
 		ToolTip = "Сколько сантиметров занимает одна плитка текстуры на стенах, крыше и полу. 0 = CellSize. В материале Tiling = 1."))
 	float TextureTileSize = 0.f;
 
+	// ---------------------------------------------------------------------
+	//  Скругление комнат формы «Круглая» (только её; прямоугольник, Г и крест
+	//  остаются прежними гранями клеток).
+	//
+	//  Стена такой комнаты идёт не лесенкой по клеткам, а плавной дугой:
+	//  ломаной из хорд окружности, вписанной в прямоугольник комнаты. Дуга
+	//  касается прямых стен там же, где окружность касается сторон, — как в
+	//  макете. Старые грани-лесенки остаются (они держат дороги и двери), а
+	//  всё, что осталось за дугой, накрывается крышкой, поэтому снаружи
+	//  видно только гладкую стену и каменную плитку вплотную к ней.
+	// ---------------------------------------------------------------------
+	UPROPERTY(EditAnywhere, Category = "Geometry", meta = (DisplayName = "Скруглять круглые комнаты",
+		ToolTip = "Стена комнат с формой «Круглая» идёт гладкой дугой вместо лесенки по клеткам. Сними галочку, чтобы вернуть прежние грани."))
+	bool bRoundCircleWalls = true;
+
+	UPROPERTY(EditAnywhere, Category = "Geometry", meta = (ClampMin = "8", ClampMax = "128", UIMin = "8", UIMax = "64",
+		DisplayName = "Граней дуги на полный круг",
+		ToolTip = "Сколько прямых граней собирают полный круг стены. 16 = грань через 22.5° (как в макете). Больше = глаже, но больше полигонов."))
+	int32 WallArcSegments = 16;
+
+	UPROPERTY(EditAnywhere, Category = "Geometry", meta = (DisplayName = "Накрывать крышей уголки за дугой",
+		ToolTip = "Дуга стоит внутри клеток, поэтому между ней и стеной клетки остаются уголки пола. С галочкой они накрыты крышкой, и снаружи контур комнаты выглядит ровно по дуге."))
+	bool bCapRoundCorners = true;
+
 	UPROPERTY(EditAnywhere, Category = "Geometry")
 	bool bSpawnMarkers = true;   // жёлтый свет на старте, красный на финише
 
@@ -368,6 +402,32 @@ private:
 
 	bool InBounds(int32 X, int32 Y) const { return X >= 0 && Y >= 0 && X < GridW && Y < GridH; }
 	int32 Idx(int32 X, int32 Y) const { return Y * GridW + X; }
+
+	// ---------------- скругление комнат формы «Круглая» ----------------
+	// Дуга стены одной круглой комнаты. Все координаты — в КЛЕТКАХ сетки
+	// (не в сантиметрах): так проще сравнивать дугу с клетками.
+	struct FRoundRoom
+	{
+		int32 RoomIndex = -1;
+		FVector2D Center;                 // центр эллипса в клетках
+		FVector2D Semi;                   // полуоси дуги в клетках (уже с подобранным отступом)
+		int32 Samples = 16;               // вершин дуги на полный круг
+		TArray<FVector2D> Pts;            // вершины дуги по кругу, Samples штук
+		TArray<uint8> Blocked;            // 1 = тут дуга разрывается (дверь/чужая клетка)
+		TArray<FIntPoint> CapCells;       // клетки пола за дугой: их накрывает крышка
+	};
+
+	int32 RoundArcSampleCount(const FPlacedRoom& Room) const;
+	bool  RoomCellOwned(int32 X, int32 Y, int32 RoomIndex) const;
+	bool  RoomCellFree(int32 X, int32 Y, int32 RoomIndex) const;
+	bool  ArcFaceCrossesRoad(float AX, float AY, float BX, float BY) const;
+	bool  ArcPointFitsRoom(float GX, float GY, const FPlacedRoom& Room, float Margin) const;
+	void  CollectDoorWindows(const FPlacedRoom& Room, const FVector2D& Center, const FVector2D& Semi,
+	                         TArray<TPair<float, float>>& Out) const;
+	bool  AngleInWindows(float Angle, const TArray<TPair<float, float>>& Windows) const;
+	float RoundArcScale(const FPlacedRoom& Room, const FVector2D& Center, const FVector2D& Semi,
+	                    int32 Samples, const TArray<TPair<float, float>>& Windows) const;
+	void  BuildRoundRooms(TArray<FRoundRoom>& Out) const;
 
 	int32 Rnd(int32 Min, int32 Max) { return Min + Stream.RandHelper(FMath::Max(1, Max - Min + 1)); }
 	void ShufflePoints(TArray<FIntPoint>& Arr);
