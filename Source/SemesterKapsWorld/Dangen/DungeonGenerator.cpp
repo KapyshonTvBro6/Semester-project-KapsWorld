@@ -1552,11 +1552,33 @@ void ADungeonGenerator::BuildRoundRooms(TArray<FRoundRoom>& OutRooms, TArray<uin
 
 				if (NoMove[F.CornerA] || NoMove[F.CornerB])
 				{
-					// сосед этого угла стоит по-старему — держим на сетке и свою грань
+					// сосед этого угла стоит по-старему — держим на сетке и свою грань.
+					// но другой её угол мог уже уйти вместе с соседней принятой гранью:
+					// тогда стена встанет поперёк проходимой клетки и перережет проходу
+					// путь. Проверяем фактическое положение обоих концов грани — именно
+					// из них стена и строится — и держим тот угол, который ушёл.
 					F.A = F.A0;
 					F.B = F.B0;
 					Reject[r][f] = 1;
-					bChanged = true;
+
+					const FVector2D HeldA = HasMove[F.CornerA] ? Proposal[F.CornerA] : CornerPoint(CornerX(F.CornerA), CornerY(F.CornerA));
+					const FVector2D HeldB = HasMove[F.CornerB] ? Proposal[F.CornerB] : CornerPoint(CornerX(F.CornerB), CornerY(F.CornerB));
+					if ((HeldB - HeldA).Size() >= 0.02f &&
+					    (RoundChordCrossesPassage(HeldA.X, HeldA.Y, HeldB.X, HeldB.Y, R.RoomIndex) ||
+					     ChordSealsPassage(HeldA, HeldB)))
+					{
+						if (HasMove[F.CornerA])
+						{
+							NoMove[F.CornerA] = 1;
+							HasMove[F.CornerA] = 0;
+						}
+						if (HasMove[F.CornerB])
+						{
+							NoMove[F.CornerB] = 1;
+							HasMove[F.CornerB] = 0;
+						}
+						bChanged = true;
+					}
 					continue;
 				}
 

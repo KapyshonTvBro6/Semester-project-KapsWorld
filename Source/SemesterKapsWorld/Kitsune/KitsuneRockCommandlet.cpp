@@ -466,6 +466,7 @@ int32 UKitsuneRockCommandlet::Main(const FString& InParams)
 
 	int32 Failures = 0;
 
+#if WITH_EDITOR
 	if (bParamsOnly)
 	{
 		// Только печать того, что лежит в мастере: значения по умолчанию и настройки
@@ -473,6 +474,15 @@ int32 UKitsuneRockCommandlet::Main(const FString& InParams)
 		const FString DumpFolder = Folder.IsEmpty() ? KitsuneRockMaterial::DefaultAssetFolder() : Folder;
 		return DumpMasterParameters(DumpFolder);
 	}
+#else
+	if (bParamsOnly)
+	{
+		// DumpMasterParameters описан внутри #if WITH_EDITOR: без этой проверки
+		// игровая (WITH_EDITOR=0) сборка модуля не компилировалась бы.
+		UE_LOG(LogTemp, Error, TEXT("-params работает только в редакторной сборке"));
+		return 1;
+	}
+#endif
 
 	if (bAntiTilingOnly)
 	{
