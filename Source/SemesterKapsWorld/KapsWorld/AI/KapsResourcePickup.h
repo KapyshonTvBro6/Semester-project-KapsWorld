@@ -1,7 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "GameFramework\Actor.h"
+#include "GameFramework/Actor.h"
 #include "KapsResourcePickup.generated.h"
 
 class USphereComponent;

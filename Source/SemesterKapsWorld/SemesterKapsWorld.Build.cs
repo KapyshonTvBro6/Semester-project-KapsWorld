@@ -20,7 +20,10 @@ public class SemesterKapsWorld : ModuleRules
 			"GameplayStateTreeModule",
 			"Niagara",
 			"UMG",
-			"Slate"
+			"Slate",
+
+			// ADungeonGenerator: стены из UProceduralMeshComponent
+			"ProceduralMeshComponent"
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[] { });
@@ -37,6 +40,23 @@ public class SemesterKapsWorld : ModuleRules
 
 		// Uncomment if you are using Slate UI
 		// PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore" });
+
+		// Editor-only зависимости: своя Details-панель для ADungeonGenerator
+		// (DungeonGeneratorDetails.cpp + регистрация в StartupModule). В игровых
+		// сборках этот код выключен, поэтому зависимости добавляются только для редактора.
+		if (Target.Type == TargetType.Editor)
+		{
+			PrivateDependencyModuleNames.AddRange(new string[]
+			{
+				"UnrealEd",        // UPropertyEditorModule
+				"PropertyEditor",  // IDetailCustomization, IDetailLayoutBuilder
+				"SlateCore",
+
+				// Kitsune/KitsuneRockAssets.cpp: FAssetRegistryModule::AssetCreated
+				// для созданных текстур, материала и инстансов
+				"AssetRegistry"
+			});
+		}
 
 		// Uncomment if you are using online features
 		// PrivateDependencyModuleNames.Add("OnlineSubsystem");
